@@ -4,60 +4,68 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
-// ⚙️ Env from Render
+// env from Render
 const BASE = process.env.BLUEBUBBLES_URL;   // e.g. https://organisations-canvas-surrounding-timer.trycloudflare.com
 const PASS = process.env.BLUEBUBBLES_PASS;  // your BlueBubbles server password
 
-// Health check
+// simple health
 app.get("/health", (req, res) => {
-  res.json({ ok: true, base: BASE || null });
+  res.json({ ok: true, base: BASE ?? null });
 });
 
-// Send a message via BlueBubbles
-app.post("/message/send", async (req, res) => {
+// one function to forward to BlueBubbles
+async function forwardToBlueBubbles(to, message) {
+  if (!BASE || !PASS) {
+    const err = new Error("Bridge not configured (missing BASE or PASS)");
+    err.status = 500;
+    throw err;
+  }
+
+  // ✅ Correct BlueBubbles endpoint (no /send)
+  const baseTrimmed = BASE.replace(/\/+$/, "");
+  const url = `${baseTrimmed}/api/v1/message?password=${encodeURIComponent(PASS)}`;
+
+  const bbRes = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: to, message }), // BlueBubbles expects "address"
+  });
+
+  const raw = await bbRes.text();
+  let data;
+  try { data = JSON.parse(raw); } catch { data = { raw }; }
+
+  if (!bbRes.ok) {
+    const err = new Error("BlueBubbles error");
+    err.status = bbRes.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// alias routes: /message/send and /send
+async function handleSend(req, res) {
   try {
     const { to, message } = req.body || {};
     if (!to || !message) {
-      return res.status(400).json({ error: "`to` and `message` are required" });
+      return res.status(400).json({ error: "to and message required" });
     }
-    if (!BASE || !PASS) {
-      return res.status(500).json({ error: "Server not configured (missing BASE or PASS)" });
-    }
-
-    const url = `${BASE.replace(/\/+$/, "")}/api/v1/message/send`;
-
-    const bbRes = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${PASS}`
-      },
-      body: JSON.stringify({
-        address: to,        // BlueBubbles expects "address"
-        message: message
-      })
-    });
-
-    // Forward BlueBubbles result
-    const text = await bbRes.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    if (!bbRes.ok) {
-      return res.status(bbRes.status).json({
-        error: "BlueBubbles error",
-        status: bbRes.status,
-        data
-      });
-    }
-
+    const data = await forwardToBlueBubbles(to, message);
     return res.status(200).json({ ok: true, data });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Bridge failure", details: String(err) });
+  } catch (e) {
+    const status = e.status || 500;
+    return res.status(status).json({
+      error: e.message || "Bridge failure",
+      ...(e.data ? { data: e.data } : {}),
+    });
   }
-});
+}
 
+app.post("/message/send", handleSend);
+app.post("/send", handleSend);
+
+// start
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Bridge running on port ${PORT}`);
