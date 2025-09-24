@@ -1,14 +1,24 @@
 {
-  "name": "bb-bridge",
-  "version": "1.0.0",
+  "name": "ghl-bluebubbles-bridge",
+  "version": "1.2.0",
   "type": "module",
+  "description": "Tiny bridge that exposes simple endpoints and forwards to BlueBubbles relay",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "NODE_ENV=development node index.js"
+    "dev": "NODE_ENV=development nodemon index.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "helmet": "^7.0.0",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
   }
 }
