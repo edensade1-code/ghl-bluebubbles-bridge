@@ -1,72 +1,68 @@
 // index.js
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-// env from Render
-const BASE = process.env.BLUEBUBBLES_URL;   // e.g. https://organisations-canvas-surrounding-timer.trycloudflare.com
-const PASS = process.env.BLUEBUBBLES_PASS;  // your BlueBubbles server password
+// ---------------------
+// CONFIG (use env vars)
+// ---------------------
+const PORT      = process.env.PORT || 8787;
+const API_KEY   = process.env.API_KEY || "change-me"; // Required header: x-api-key
+const BB_BASE   = process.env.BB_BASE || "https://monday-relocation-considering-glance.trycloudflare.com";
+const BB_GUID   = process.env.BB_GUID || "6k7nUHzHorFk4rXdEANi"; // this is your BlueBubbles server password
 
-// simple health
-app.get("/health", (req, res) => {
-  res.json({ ok: true, base: BASE ?? null });
+// simple auth
+app.use((req, res, next) => {
+  if (req.path === "/health") return next();
+  if (req.headers["x-api-key"] !== API_KEY) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  next();
 });
 
-// one function to forward to BlueBubbles
-async function forwardToBlueBubbles(to, message) {
-  if (!BASE || !PASS) {
-    const err = new Error("Bridge not configured (missing BASE or PASS)");
-    err.status = 500;
-    throw err;
-  }
+// health
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-  // ✅ Correct BlueBubbles endpoint (no /send)
-  const baseTrimmed = BASE.replace(/\/+$/, "");
-  const url = `${baseTrimmed}/api/v1/message?password=${encodeURIComponent(PASS)}`;
-
-  const bbRes = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ address: to, message }), // BlueBubbles expects "address"
-  });
-
-  const raw = await bbRes.text();
-  let data;
-  try { data = JSON.parse(raw); } catch { data = { raw }; }
-
-  if (!bbRes.ok) {
-    const err = new Error("BlueBubbles error");
-    err.status = bbRes.status;
-    err.data = data;
-    throw err;
-  }
-  return data;
-}
-
-// alias routes: /message/send and /send
-async function handleSend(req, res) {
+// GHL -> SEND iMessage via BlueBubbles
+// Body expected: { "to":"+1XXXXXXXXXX", "text":"hello" }
+app.post("/send", async (req, res) => {
   try {
-    const { to, message } = req.body || {};
-    if (!to || !message) {
-      return res.status(400).json({ error: "to and message required" });
-    }
-    const data = await forwardToBlueBubbles(to, message);
-    return res.status(200).json({ ok: true, data });
-  } catch (e) {
-    const status = e.status || 500;
-    return res.status(status).json({
-      error: e.message || "Bridge failure",
-      ...(e.data ? { data: e.data } : {}),
+    const { to, text } = req.body || {};
+    if (!to || !text) return res.status(400).json({ error: "missing to/text" });
+
+    // BlueBubbles expects chatGuid like: iMessage;-;+1XXXXXXXXXX
+    const payload = {
+      chatGuid: `iMessage;-;${to}`,
+      tempGuid: `temp-${Date.now()}`,
+      message: text,
+      method: "apple-script"
+    };
+
+    const url = `${BB_BASE}/api/v1/message/text?guid=${encodeURIComponent(BB_GUID)}`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
     });
+
+    const data = await r.json().catch(() => ({}));
+    return res.status(r.status).json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
-}
-
-app.post("/message/send", handleSend);
-app.post("/send", handleSend);
-
-// start
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Bridge running on port ${PORT}`);
 });
+
+// BlueBubbles -> inbound webhook (we’ll map to GHL later)
+app.post("/inbound", async (req, res) => {
+  // TODO: upsert contact + append conversation in GHL
+  console.log("Inbound from BlueBubbles:", JSON.stringify(req.body));
+  res.sendStatus(200);
+});
+
+app.listen(PORT, () => {
+  console.log(`Bridge listening on :${PORT}`);
+  console.log(`Expect header: x-api-key: ${API_KEY}`);
+});
+
