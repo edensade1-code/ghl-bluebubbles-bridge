@@ -51,7 +51,7 @@ const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 // OAuth (HighLevel Marketplace)
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
-const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge.onrender.com/oauth/callback").trim();
+const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback").trim();
 const OAUTH_BASE = "https://marketplace.gohighlevel.com/oauth";
 
 // Shared secret for verifying your own inbound subscription calls (and/or marketplace webhook)
