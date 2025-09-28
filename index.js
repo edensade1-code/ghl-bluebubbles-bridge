@@ -302,10 +302,14 @@ app.post("/ghl/webhook", (req, res) => {
     }
     console.log("[bridge] /ghl/webhook verified");
     return res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error("[bridge] /ghl/webhook error:", e?.message);
-    return res.status(200).json({ ok: true });
-  }
+} catch (e) {
+  console.error(
+    "[oauth] callback error:",
+    e?.response?.status,
+    e?.response?.data || e.message
+  );
+  return res.status(500).send("OAuth error. Check server logs for details.");
+}
 });
 
 // ---------- OAuth (HighLevel) ----------
@@ -336,17 +340,22 @@ app.get("/oauth/callback", async (req, res) => {
     const { code } = req.query;
     if (!code) return res.status(400).send("Missing authorization code.");
 
-    const tokenRes = await axios.post(
-      `${OAUTH_BASE}/token`,
-      {
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: GHL_REDIRECT_URI,
-      },
-      { headers: { "Content-Type": "application/json" }, timeout: 20000 }
-    );
+  const body = qs.stringify({
+  client_id: CLIENT_ID,
+  client_secret: CLIENT_SECRET,
+  grant_type: "authorization_code",
+  code,
+  redirect_uri: GHL_REDIRECT_URI,
+});
+
+const tokenRes = await axios.post(
+  `${OAUTH_BASE}/token`,
+  body,
+  {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 20000,
+  }
+);
 
     const tokens = tokenRes.data || {};
     const locationId =
