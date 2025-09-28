@@ -1,5 +1,5 @@
 // index.js
-// All-in-one bridge for GHL ↔ BlueBubbles (iMessage), with optional OAuth & signed webhooks.
+// All-in-one bridge for GHL ↔ BlueBubbles (iMessage), with OAuth, actions/triggers, and a minimal inbox UI.
 
 import express from "express";
 import cors from "cors";
@@ -18,12 +18,13 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(bodyParser.text({ type: ["text/*"] })); // just in case
 
-// CORS and security headers (allow GHL iframing later)
+// CORS and security headers (allow GHL iframing)
 app.use(
   helmet({
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
+        // allow embedding in GHL
         "frame-ancestors": ["'self'", "*.gohighlevel.com", "*.leadconnectorhq.com"],
       },
     },
@@ -41,23 +42,24 @@ app.use(morgan("tiny"));
 const PORT = Number(process.env.PORT || 8080);
 
 // BlueBubbles relay
-const BB_BASE =
-  process.env.BB_BASE?.trim() || "https://relay.asapcashhomebuyers.com";
-const BB_GUID =
-  process.env.BB_GUID?.trim() || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD";
+const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
+const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// Forward inbound iMessage events (optional)
-const GHL_INBOUND_URL = process.env.GHL_INBOUND_URL?.trim() || "";
+// Optional forward of normalized inbound to your own GHL workflow webhook
+const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
-// OAuth (optional)
-const CLIENT_ID = process.env.CLIENT_ID?.trim() || "";
-const CLIENT_SECRET = process.env.CLIENT_SECRET?.trim() || "";
-const GHL_REDIRECT_URI =
-  process.env.GHL_REDIRECT_URI?.trim() ||
-  "https://ieden-bluebubbles-bridge.onrender.com/oauth/callback";
+// OAuth (HighLevel Marketplace)
+const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
+const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
+const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge.onrender.com/oauth/callback").trim();
+const OAUTH_BASE = "https://marketplace.gohighlevel.com/oauth";
 
-// Signed marketplace webhooks (optional)
-const GHL_SHARED_SECRET = process.env.GHL_SHARED_SECRET?.trim() || "";
+// Shared secret for verifying your own inbound subscription calls (and/or marketplace webhook)
+const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
+
+// Simple in-memory token store (swap for DB later)
+const tokenStore = new Map();
+// tokenStore.set(<locationId>, { access_token, refresh_token, expires_in, ... })
 
 // Logging hints
 if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
@@ -70,7 +72,7 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
 }
 if (!GHL_SHARED_SECRET) {
-  console.log("[bridge] GHL_SHARED_SECRET not set (will not verify marketplace webhook signatures).");
+  console.log("[bridge] GHL_SHARED_SECRET not set (Bearer header/HMAC checks will be skipped).");
 }
 
 // ---------- Helpers ----------
@@ -83,7 +85,6 @@ const toE164US = (raw) => {
   const d = String(raw).replace(/\D/g, "");
   if (d.startsWith("1") && d.length === 11) return `+${d}`;
   if (d.length === 10) return `+1${d}`;
-  // if already +E.164
   if (String(raw).startsWith("+")) return String(raw);
   return null;
 };
@@ -96,6 +97,7 @@ const ensureE164 = (phone) => {
 
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
+// Low-level BlueBubbles calls
 const bbPost = async (path, body) => {
   const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
   const { data } = await axios.post(url, body, {
@@ -104,15 +106,19 @@ const bbPost = async (path, body) => {
   });
   return data;
 };
+const bbGet = async (path) => {
+  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+  const { data } = await axios.get(url, { timeout: 15000 });
+  return data;
+};
 
-// Verify GHL marketplace webhook HMAC (if secret is set)
+// Verify HMAC signature from GHL (if you use X-GHL-Signature hex)
 const verifyGhlSignature = (req) => {
   if (!GHL_SHARED_SECRET) return true; // skip if not configured
-  const sig = req.header("X-GHL-Signature") || "";
-  // GHL typically signs the raw body. We reconstruct raw if possible:
+  const sigHex = req.header("X-GHL-Signature") || "";
+  // Reconstruct raw body best-effort
   let raw = "";
   try {
-    // If JSON, re-stringify; if urlencoded, rebuild; if text, as-is
     if (req.is("application/json")) raw = JSON.stringify(req.body);
     else if (req.is("application/x-www-form-urlencoded")) raw = qs.stringify(req.body);
     else if (typeof req.body === "string") raw = req.body;
@@ -120,9 +126,19 @@ const verifyGhlSignature = (req) => {
   } catch {
     raw = "";
   }
-  const hmac = crypto.createHmac("sha256", GHL_SHARED_SECRET).update(raw).digest("hex");
-  const match = crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(sig || "", "utf8"));
-  return match;
+  const expectedHex = crypto.createHmac("sha256", GHL_SHARED_SECRET).update(raw).digest("hex");
+  // Length check to avoid timingSafeEqual throw
+  if (expectedHex.length !== sigHex.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expectedHex, "hex"), Buffer.from(sigHex, "hex"));
+};
+
+// Optional Bearer check (for Subscription URL you configured)
+const verifyBearer = (req) => {
+  if (!GHL_SHARED_SECRET) return true;
+  const auth = req.header("Authorization") || "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  return m[1].trim() === GHL_SHARED_SECRET;
 };
 
 // ---------- Routes ----------
@@ -135,6 +151,7 @@ app.get("/", (_req, res) => {
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
+    routes: ["/health", "/send", "/bb", "/webhook", "/api/chats", "/api/messages", "/app", "/oauth/start", "/oauth/callback", "/oauth/debug"],
   });
 });
 
@@ -174,7 +191,18 @@ app.post("/send", async (req, res) => {
     };
 
     const data = await bbPost("/api/v1/message/text", payload);
-    return res.status(200).json({ ok: true, relay: BB_BASE, data });
+
+    // Optional: shape success to look like a common SMS response
+    return res.status(200).json({
+      ok: true,
+      provider: "eden-imessage",
+      relay: BB_BASE,
+      data: {
+        guid: data?.guid || data?.data?.guid || payload.tempGuid,
+        text: data?.text || message,
+        isDelivered: !!(data?.isDelivered ?? true),
+      },
+    });
   } catch (err) {
     const status = err?.response?.status ?? 500;
     return res.status(status).json({
@@ -204,9 +232,17 @@ app.post("/bb", async (req, res) => {
   }
 });
 
-// INBOUND from BlueBubbles → optional forward to GHL
+// INBOUND handler (dual-mode):
+// - If called by BlueBubbles relay → normalize and (optionally) forward to your GHL webhook
+// - If called by GHL Trigger Subscription URL (with Bearer) → just 200 OK
 app.post("/webhook", async (req, res) => {
   try {
+    // Allow GHL subscription pings through with Bearer
+    if (verifyBearer(req)) {
+      console.log("[bridge] /webhook: GHL subscription event");
+      return res.status(200).json({ ok: true });
+    }
+
     const event = req.body || {};
     const evtName =
       event?.event ||
@@ -214,7 +250,7 @@ app.post("/webhook", async (req, res) => {
       event?.name ||
       (event?.data?.message ? "new-message" : "webhook");
 
-    // Normalize a few handy fields
+    // Normalize some handy fields (BlueBubbles inbound)
     const normalized = {
       event: evtName,
       messageText:
@@ -226,6 +262,9 @@ app.post("/webhook", async (req, res) => {
         event?.data?.message?.handle?.address ??
         event?.message?.handle?.address ??
         null,
+      to:
+        event?.data?.message?.chats?.[0]?.lastAddressedHandle ??
+        null,
       chatGuid:
         event?.data?.message?.chats?.[0]?.guid ??
         event?.data?.chat?.guid ??
@@ -234,7 +273,7 @@ app.post("/webhook", async (req, res) => {
       receivedAt: new Date().toISOString(),
     };
 
-    // Forward if configured
+    // Forward if configured (your internal GHL inbound webhook)
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(GHL_INBOUND_URL, normalized, {
@@ -247,22 +286,20 @@ app.post("/webhook", async (req, res) => {
     }
 
     console.log("[bridge] /webhook:", evtName, normalized.messageText);
+    // Always 200 so BlueBubbles doesn't retry
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[bridge] /webhook error:", err?.message);
-    // ACK 200 so BB doesn't retry forever
     return res.status(200).json({ ok: true });
   }
 });
 
-// Example: signed GHL marketplace webhooks (optional)
+// Example: signed marketplace webhooks (install/uninstall). Optional.
 app.post("/ghl/webhook", (req, res) => {
   try {
     if (!verifyGhlSignature(req)) {
       return res.status(401).json({ ok: false, error: "Invalid signature" });
     }
-    // Handle install/uninstall/account events here:
-    // const evt = req.body;
     console.log("[bridge] /ghl/webhook verified");
     return res.status(200).json({ ok: true });
   } catch (e) {
@@ -271,18 +308,18 @@ app.post("/ghl/webhook", (req, res) => {
   }
 });
 
-// ---------- OAuth (optional) ----------
-const OAUTH_BASE = "https://marketplace.gohighlevel.com/oauth";
+// ---------- OAuth (HighLevel) ----------
 
+// (Optional) Start OAuth flow manually if needed
 app.get("/oauth/start", (req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
-    return res.status(400).send("OAuth not configured.");
+    return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
   const scope = [
-    "conversations.readonly",
+    "conversations.read",
     "conversations.write",
-    "contacts.readonly",
-    "locations.readonly",
+    "contacts.read",
+    "locations.read",
   ].join(" ");
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
@@ -293,10 +330,11 @@ app.get("/oauth/start", (req, res) => {
   return res.redirect(`${OAUTH_BASE}/authorize?${params.toString()}`);
 });
 
+// Handle OAuth callback and store tokens (in-memory for now)
 app.get("/oauth/callback", async (req, res) => {
   try {
-    const code = req.query.code;
-    if (!code) return res.status(400).send("Missing code");
+    const { code } = req.query;
+    if (!code) return res.status(400).send("Missing authorization code.");
 
     const tokenRes = await axios.post(
       `${OAUTH_BASE}/token`,
@@ -307,34 +345,69 @@ app.get("/oauth/callback", async (req, res) => {
         code,
         redirect_uri: GHL_REDIRECT_URI,
       },
-      { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+      { headers: { "Content-Type": "application/json" }, timeout: 20000 }
     );
 
-    const tokens = tokenRes.data;
-    // TODO: Persist tokens by sub-account (locationId). For now, just log.
-    console.log("[bridge] OAuth tokens:", Object.keys(tokens));
+    const tokens = tokenRes.data || {};
+    const locationId =
+      tokens.locationId ||
+      tokens.location_id ||
+      tokens.location ||
+      "default";
+
+    tokenStore.set(locationId, tokens);
+
+    console.log("[oauth] tokens saved for location:", locationId, {
+      haveAccess: !!tokens.access_token,
+      haveRefresh: !!tokens.refresh_token,
+      expiresIn: tokens.expires_in,
+    });
 
     return res
       .status(200)
-      .send("Connected to HighLevel. You can close this window.");
+      .send(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>App Connected</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0b0c;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh}
+  .card{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:560px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  h1{margin:0 0 6px;font-size:22px}
+  p{margin:6px 0 0;color:#9ca3af}
+  .ok{display:inline-block;margin-top:14px;background:#16a34a;color:#fff;padding:8px 12px;border-radius:8px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>✅ Eden iMessage connected</h1>
+    <p>You can close this window and return to HighLevel.</p>
+    <div class="ok">Location: ${locationId}</div>
+  </div>
+  <script>
+    setTimeout(() => { window.close?.(); }, 1500);
+  </script>
+</body>
+</html>`);
   } catch (e) {
-    console.error("[bridge] OAuth callback error:", e?.response?.data || e.message);
-    return res.status(500).send("OAuth error");
+    console.error("[oauth] callback error:", e?.response?.data || e.message);
+    return res.status(500).send("OAuth error. Check server logs for details.");
   }
 });
-// --- BB GET helper (add near bbPost) ---
-const bbGet = async (path) => {
-  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
-  const { data } = await axios.get(url, { timeout: 15000 });
-  return data;
-};
 
-// --- List chats (for sidebar) ---
+// Quick debug (no secrets exposed)
+app.get("/oauth/debug", (_req, res) => {
+  const entries = Array.from(tokenStore.keys());
+  res.json({ ok: true, locationsWithTokens: entries });
+});
+
+// ---------- BlueBubbles proxy UI ----------
+
+// List chats (for sidebar)
 app.get("/api/chats", async (_req, res) => {
   try {
-    // BlueBubbles: GET /api/v1/chats?guid=...
     const data = await bbGet("/api/v1/chats");
-    // map lightly for UI
     const chats = (data?.data ?? data ?? []).map((c) => ({
       guid: c.guid,
       name: c.displayName || c.chatIdentifier || c.guid,
@@ -346,17 +419,15 @@ app.get("/api/chats", async (_req, res) => {
   }
 });
 
-// --- Get messages for a chat ---
+// Get messages for a chat
 app.get("/api/messages", async (req, res) => {
   try {
     const chatGuid = req.query.chatGuid;
     if (!chatGuid) return res.status(400).json({ ok: false, error: "chatGuid required" });
 
-    // BlueBubbles: GET /api/v1/chat/{guid}/messages?limit=50&offset=0&includeDeleted=false
     const path = `/api/v1/chat/${encodeURIComponent(chatGuid)}/messages?limit=50`;
     const data = await bbGet(path);
 
-    // Normalize minimally
     const messages = (data?.data ?? data ?? []).map((m) => ({
       guid: m.guid,
       text: m.text || "",
@@ -368,7 +439,8 @@ app.get("/api/messages", async (req, res) => {
     res.status(500).json({ ok: false, error: e?.response?.data ?? e?.message });
   }
 });
-// --- Minimal embedded UI for GHL Custom Page ---
+
+// Minimal embedded UI for GHL Custom Page
 app.get("/app", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(`<!doctype html>
@@ -413,7 +485,7 @@ app.get("/app", (_req, res) => {
   <main class="main">
     <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
     <div class="composer">
-      <textarea id="text" placeholder="Type a message…"></textarea>
+      <textarea id="text" placeholder="Type an iMessage…"></textarea>
       <button id="send">Send</button>
     </div>
   </main>
@@ -495,7 +567,7 @@ async function send(){
     const j = await r.json();
     if(!j.ok){ alert('Send failed: ' + (j.error||'unknown')); }
     textEl.value = '';
-    setTimeout(renderMessages, 700); // refresh shortly
+    setTimeout(renderMessages, 700);
   }catch(e){
     alert('Send error: '+e.message);
   }finally{
@@ -514,11 +586,12 @@ textEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.
 </body>
 </html>`);
 });
+
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
   console.log(`[bridge] BB_BASE = ${BB_BASE}`);
   if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
   if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
-  if (GHL_SHARED_SECRET) console.log("[bridge] GHL webhook signature verification enabled.");
+  if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
 });
