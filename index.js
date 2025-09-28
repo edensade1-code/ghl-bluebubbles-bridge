@@ -322,7 +322,198 @@ app.get("/oauth/callback", async (req, res) => {
     return res.status(500).send("OAuth error");
   }
 });
+// --- BB GET helper (add near bbPost) ---
+const bbGet = async (path) => {
+  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+  const { data } = await axios.get(url, { timeout: 15000 });
+  return data;
+};
 
+// --- List chats (for sidebar) ---
+app.get("/api/chats", async (_req, res) => {
+  try {
+    // BlueBubbles: GET /api/v1/chats?guid=...
+    const data = await bbGet("/api/v1/chats");
+    // map lightly for UI
+    const chats = (data?.data ?? data ?? []).map((c) => ({
+      guid: c.guid,
+      name: c.displayName || c.chatIdentifier || c.guid,
+      last: c?.lastMessage?.text || "",
+    }));
+    res.json({ ok: true, chats });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data ?? e?.message });
+  }
+});
+
+// --- Get messages for a chat ---
+app.get("/api/messages", async (req, res) => {
+  try {
+    const chatGuid = req.query.chatGuid;
+    if (!chatGuid) return res.status(400).json({ ok: false, error: "chatGuid required" });
+
+    // BlueBubbles: GET /api/v1/chat/{guid}/messages?limit=50&offset=0&includeDeleted=false
+    const path = `/api/v1/chat/${encodeURIComponent(chatGuid)}/messages?limit=50`;
+    const data = await bbGet(path);
+
+    // Normalize minimally
+    const messages = (data?.data ?? data ?? []).map((m) => ({
+      guid: m.guid,
+      text: m.text || "",
+      fromMe: !!m.isFromMe,
+      date: m.dateCreated || m.date || null,
+    }));
+    res.json({ ok: true, chatGuid, messages });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data ?? e?.message });
+  }
+});
+// --- Minimal embedded UI for GHL Custom Page ---
+app.get("/app", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>iMessage Inbox</title>
+<style>
+  :root{color-scheme:dark light}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0b0c;color:#e5e7eb}
+  header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #1f2937}
+  .wrap{display:grid;grid-template-columns:280px 1fr;gap:0}
+  .sidebar{border-right:1px solid #1f2937;max-height:calc(100vh - 58px);overflow:auto}
+  .chat{padding:12px 14px;border-bottom:1px solid #111827;cursor:pointer}
+  .chat:hover{background:#0f172a}
+  .chat.active{background:#111827}
+  .main{display:flex;flex-direction:column;height:calc(100vh - 58px)}
+  .msgs{flex:1;overflow:auto;padding:16px}
+  .msg{max-width:70%;margin:8px 0;padding:10px 12px;border-radius:12px;line-height:1.3;white-space:pre-wrap}
+  .me{background:#2563eb;color:white;margin-left:auto}
+  .them{background:#111827}
+  .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}
+  input,button,textarea{font-size:15px}
+  textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
+  button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .status{font-size:12px;color:#9ca3af}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <strong>iMessage (Private)</strong>
+    <span class="status" id="status">checking…</span>
+  </div>
+  <div class="status">Relay: ${BB_BASE}</div>
+</header>
+
+<div class="wrap">
+  <aside class="sidebar" id="list"></aside>
+  <main class="main">
+    <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
+    <div class="composer">
+      <textarea id="text" placeholder="Type a message…"></textarea>
+      <button id="send">Send</button>
+    </div>
+  </main>
+</div>
+
+<script>
+const statusEl = document.getElementById('status');
+const listEl = document.getElementById('list');
+const msgsEl = document.getElementById('msgs');
+const sendBtn = document.getElementById('send');
+const textEl = document.getElementById('text');
+
+let current = null;
+
+async function ping(){
+  try{
+    const r = await fetch('/health');
+    const j = await r.json();
+    statusEl.textContent = j.ok ? 'online' : 'offline';
+  }catch(e){
+    statusEl.textContent = 'offline';
+  }
+}
+
+async function loadChats(){
+  const r = await fetch('/api/chats');
+  const j = await r.json();
+  listEl.innerHTML = '';
+  (j.chats||[]).forEach(c=>{
+    const div = document.createElement('div');
+    div.className = 'chat' + (current===c.guid ? ' active':'');
+    div.textContent = (c.name || c.guid);
+    div.onclick = ()=>select(c.guid);
+    listEl.appendChild(div);
+  });
+}
+
+async function select(guid){
+  current = guid;
+  await renderMessages();
+  Array.from(listEl.children).forEach(el=>{
+    el.classList.toggle('active', el.textContent.includes(''+guid) ? true : false);
+  });
+}
+
+function bubble(m){
+  const div = document.createElement('div');
+  div.className = 'msg ' + (m.fromMe ? 'me':'them');
+  div.textContent = m.text || '';
+  return div;
+}
+
+async function renderMessages(){
+  if(!current){ return; }
+  msgsEl.innerHTML = '';
+  const r = await fetch('/api/messages?chatGuid='+encodeURIComponent(current));
+  const j = await r.json();
+  (j.messages||[]).forEach(m=> msgsEl.appendChild(bubble(m)));
+  msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+
+async function send(){
+  if(!current){ alert('Pick a chat first'); return; }
+  const text = (textEl.value||'').trim();
+  if(!text) return;
+
+  // Extract phone from chatGuid when possible: iMessage;-;+1XXXXXXXXXX
+  let to = null;
+  try {
+    const parts = current.split(';');
+    to = parts[2];
+  } catch(_) {}
+
+  if(!to){ alert('Cannot derive phone from chatGuid'); return; }
+
+  sendBtn.disabled = true;
+  try{
+    const r = await fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to, message:text})});
+    const j = await r.json();
+    if(!j.ok){ alert('Send failed: ' + (j.error||'unknown')); }
+    textEl.value = '';
+    setTimeout(renderMessages, 700); // refresh shortly
+  }catch(e){
+    alert('Send error: '+e.message);
+  }finally{
+    sendBtn.disabled = false;
+  }
+}
+
+sendBtn.addEventListener('click', send);
+textEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+
+(async function(){
+  await ping();
+  await loadChats();
+})();
+</script>
+</body>
+</html>`);
+});
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
