@@ -117,8 +117,16 @@ const verifyGhlSignature = (req) => {
 
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
-  const m = (req.header("Authorization") || "").match(/^Bearer\s+(.+)$/i);
-  return !!m && m[1].trim() === GHL_SHARED_SECRET;
+
+  // Try Authorization header first
+  const auth = req.header("Authorization") || "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
+
+  // Fallback: GHL sometimes sends ?key= on query string
+  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true;
+
+  return false;
 };
 
 // Extract flexible fields GHL might send
