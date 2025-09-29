@@ -18,14 +18,18 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(bodyParser.text({ type: ["text/*"] })); // just in case
 
-// CORS and security headers (allow GHL iframing)
+// CORS and security headers (allow GHL/LeadConnector iframing)
 app.use(
   helmet({
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
-        // allow embedding in GHL
-        "frame-ancestors": ["'self'", "*.gohighlevel.com", "*.leadconnectorhq.com"],
+        "frame-ancestors": [
+          "'self'",
+          "*.gohighlevel.com",
+          "*.leadconnectorhq.com",
+          "*.msgsndr.com"
+        ],
       },
     },
     frameguard: { action: "sameorigin" },
@@ -33,7 +37,7 @@ app.use(
 );
 app.use(
   cors({
-    origin: [/\.gohighlevel\.com$/, /\.leadconnectorhq\.com$/, /localhost/, /.*/],
+    origin: [/\.gohighlevel\.com$/, /\.leadconnectorhq\.com$/, /\.msgsndr\.com$/, /localhost/],
     credentials: true,
   })
 );
@@ -48,11 +52,13 @@ const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWOR
 // Optional forward of normalized inbound to your own GHL workflow webhook
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
-// OAuth (HighLevel Marketplace)
+// OAuth (HighLevel / LeadConnector)
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
 const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback").trim();
-const OAUTH_BASE = "https://marketplace.gohighlevel.com/oauth";
+
+// Use LeadConnector services host for OAuth (token + authorize)
+const OAUTH_BASE = "https://services.leadconnectorhq.com/oauth";
 
 // Shared secret for verifying your own inbound subscription calls (and/or marketplace webhook)
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
@@ -127,7 +133,6 @@ const verifyGhlSignature = (req) => {
     raw = "";
   }
   const expectedHex = crypto.createHmac("sha256", GHL_SHARED_SECRET).update(raw).digest("hex");
-  // Length check to avoid timingSafeEqual throw
   if (expectedHex.length !== sigHex.length) return false;
   return crypto.timingSafeEqual(Buffer.from(expectedHex, "hex"), Buffer.from(sigHex, "hex"));
 };
@@ -151,7 +156,18 @@ app.get("/", (_req, res) => {
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
-    routes: ["/health", "/send", "/bb", "/webhook", "/api/chats", "/api/messages", "/app", "/oauth/start", "/oauth/callback", "/oauth/debug"],
+    routes: [
+      "/health",
+      "/send",
+      "/bb",
+      "/webhook",
+      "/api/chats",
+      "/api/messages",
+      "/app",
+      "/oauth/start",
+      "/oauth/callback",
+      "/oauth/debug"
+    ],
   });
 });
 
@@ -192,7 +208,6 @@ app.post("/send", async (req, res) => {
 
     const data = await bbPost("/api/v1/message/text", payload);
 
-    // Optional: shape success to look like a common SMS response
     return res.status(200).json({
       ok: true,
       provider: "eden-imessage",
@@ -302,19 +317,15 @@ app.post("/ghl/webhook", (req, res) => {
     }
     console.log("[bridge] /ghl/webhook verified");
     return res.status(200).json({ ok: true });
-} catch (e) {
-  console.error(
-    "[oauth] callback error:",
-    e?.response?.status,
-    e?.response?.data || e.message
-  );
-  return res.status(500).send("OAuth error. Check server logs for details.");
-}
+  } catch (e) {
+    console.error("[ghl/webhook] error:", e?.message);
+    return res.status(200).json({ ok: true });
+  }
 });
 
-// ---------- OAuth (HighLevel) ----------
+// ---------- OAuth (HighLevel / LeadConnector) ----------
 
-// (Optional) Start OAuth flow manually if needed
+// Start OAuth flow manually if needed
 app.get("/oauth/start", (req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
@@ -337,25 +348,26 @@ app.get("/oauth/start", (req, res) => {
 // Handle OAuth callback and store tokens (in-memory for now)
 app.get("/oauth/callback", async (req, res) => {
   try {
-    const { code } = req.query;
+    const { code, error, error_description } = req.query;
+    if (error) {
+      console.error("[oauth] authorize error:", error, error_description || "");
+      return res.status(400).send("OAuth denied. Please try again.");
+    }
     if (!code) return res.status(400).send("Missing authorization code.");
 
-  const body = qs.stringify({
-  client_id: CLIENT_ID,
-  client_secret: CLIENT_SECRET,
-  grant_type: "authorization_code",
-  code,
-  redirect_uri: GHL_REDIRECT_URI,
-});
+    const body = qs.stringify({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: GHL_REDIRECT_URI,
+    });
 
-const tokenRes = await axios.post(
-  `${OAUTH_BASE}/token`,
-  body,
-  {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    timeout: 20000,
-  }
-);
+    const tokenRes = await axios.post(
+      `${OAUTH_BASE}/token`,
+      body,
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 20000 }
+    );
 
     const tokens = tokenRes.data || {};
     const locationId =
@@ -400,7 +412,11 @@ const tokenRes = await axios.post(
 </body>
 </html>`);
   } catch (e) {
-    console.error("[oauth] callback error:", e?.response?.data || e.message);
+    console.error(
+      "[oauth] callback error:",
+      e?.response?.status,
+      e?.response?.data || e.message
+    );
     return res.status(500).send("OAuth error. Check server logs for details.");
   }
 });
