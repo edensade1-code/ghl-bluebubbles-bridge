@@ -229,6 +229,74 @@ app.post("/send", async (req, res) => {
     });
   }
 });
+// --- Conversation Provider Delivery URL (used by native GHL compose) ---
+app.post("/provider/deliver", async (req, res) => {
+  try {
+    // Optional auth (prefer header Bearer, fallback to ?key=...)
+    const authOk =
+      verifyBearer(req) ||
+      (GHL_SHARED_SECRET && (req.query.key || "").trim() === GHL_SHARED_SECRET);
+    if (!authOk && GHL_SHARED_SECRET) {
+      return res.status(401).json({ status: "error", error: "Unauthorized" });
+    }
+
+    // Log what GHL actually sends so we can see the shape
+    console.log("[provider] incoming headers:", req.headers);
+    console.log("[provider] incoming body:", req.body);
+
+    // Accept multiple common shapes:
+    // 1) { to: "+1...", message: "Hello" }
+    // 2) { toNumber: "+1...", body: "Hello" }
+    // 3) { address: "+1...", text: "Hello" }
+    // 4) { phone: "+1...", messageText: "Hello" }
+    const rawTo =
+      req.body?.to ??
+      req.body?.toNumber ??
+      req.body?.address ??
+      req.body?.phone ??
+      req.body?.destination ??
+      null;
+
+    const rawMsg =
+      req.body?.message ??
+      req.body?.body ??
+      req.body?.text ??
+      req.body?.messageText ??
+      req.body?.content ??
+      null;
+
+    if (!rawTo || !rawMsg) {
+      return res
+        .status(400)
+        .json({ status: "error", error: "Missing 'to' or 'message' in payload" });
+    }
+
+    const e164 = ensureE164(rawTo);
+    const payload = {
+      chatGuid: chatGuidForPhone(e164),
+      tempGuid: newTempGuid("temp-provider"),
+      message: String(rawMsg),
+      method: "apple-script",
+    };
+
+    // Send via BlueBubbles
+    const data = await bbPost("/api/v1/message/text", payload);
+
+    // Respond in a success shape GHL is happy with
+    return res.status(200).json({
+      status: "success",
+      messageId: data?.guid || data?.data?.guid || payload.tempGuid,
+      delivered: !!(data?.isDelivered ?? true),
+    });
+  } catch (err) {
+    console.error("[provider] deliver error:", err?.response?.data || err.message);
+    const status = err?.response?.status ?? 500;
+    return res.status(status).json({
+      status: "error",
+      error: err?.response?.data || err.message || "Unknown error",
+    });
+  }
+});
 
 // Power-user passthrough: { path:"/api/v1/...", body:{...} }
 app.post("/bb", async (req, res) => {
