@@ -701,6 +701,84 @@ textEl.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.
 </html>`);
 });
 
+// --- Normalize provider payloads and send via BlueBubbles ---
+const extractToAndMessage = (body = {}) => {
+  // Accept many possible field names from GHL or other callers
+  const to =
+    body.to ||
+    body.toNumber ||
+    body.to_phone ||
+    body.recipient?.phone ||
+    body.recipientPhone ||
+    body.phone ||
+    body.number ||
+    body.toPhone ||
+    body.to_phone_number ||
+    null;
+
+  const message =
+    body.message ||
+    body.text ||
+    body.body ||
+    body.content ||
+    body.messageBody ||
+    null;
+
+  return { to, message };
+};
+
+// One handler both routes can use
+const handleProviderSend = async (req, res) => {
+  try {
+    // Log the raw body once so you can see the exact shape GHL posts
+    console.log("[provider] inbound payload:", JSON.stringify(req.body));
+
+    let { to, message } = extractToAndMessage(req.body || {});
+    if (!to) to = req.query.to; // allow ?to= as a fallback during tests
+    if (!message) message = req.query.message;
+
+    const e164 = ensureE164(to);
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
+    }
+
+    const payload = {
+      chatGuid: chatGuidForPhone(e164),
+      tempGuid: newTempGuid("temp-bridge"),
+      message: String(message),
+      method: "apple-script",
+    };
+
+    const data = await bbPost("/api/v1/message/text", payload);
+
+    // Return a very “tolerant” success shape (covers several conventions)
+    return res.status(200).json({
+      ok: true,
+      success: true,
+      status: "sent",
+      provider: "eden-imessage",
+      relay: BB_BASE,
+      id: data?.guid || data?.data?.guid || payload.tempGuid,
+      data,
+    });
+  } catch (err) {
+    console.error("[provider] send error:", err?.response?.data || err.message);
+    const status = err?.response?.status ?? 500;
+    // Still return JSON so GHL logs something readable
+    return res.status(status).json({
+      ok: false,
+      success: false,
+      error: err?.response?.data ?? err?.message ?? "Unknown error",
+    });
+  }
+};
+
+// Delivery URL for the Marketplace Conversation Provider
+app.post("/provider/deliver", handleProviderSend);
+
+// Keep /send working for tests and webhooks
+app.post("/send", handleProviderSend);
+
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
