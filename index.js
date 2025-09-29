@@ -229,6 +229,19 @@ app.post("/send", async (req, res) => {
     });
   }
 });
+// Debug: log outgoing sends
+app.post("/debug-send", async (req, res) => {
+  console.log("[debug-send] body:", req.body);
+  try {
+    const r = await axios.post("http://localhost:" + PORT + "/send", req.body, {
+      headers: { "Content-Type": "application/json" }
+    });
+    res.json(r.data);
+  } catch (e) {
+    console.error("[debug-send] error:", e?.response?.data || e.message);
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
 // --- Conversation Provider Delivery URL (used by native GHL compose) ---
 app.post("/provider/deliver", async (req, res) => {
   try {
