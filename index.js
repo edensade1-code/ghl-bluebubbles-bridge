@@ -519,6 +519,25 @@ app.get("/app", (_req, res) => {
 </div>
 
 <script>
+(async function(){
+  try {
+    const r = await fetch('/oauth/debug');
+    const j = await r.json();
+    if (!j.locationsWithTokens || j.locationsWithTokens.length === 0) {
+      // No tokens saved, redirect top-level window to auth
+      if (window.top === window.self) {
+        // already top
+        window.location.href = '/oauth/start';
+      } else {
+        // bust out of iframe
+        window.top.location.href = '/oauth/start';
+      }
+      return;
+    }
+  } catch(e) {
+    console.error('Auth check failed', e);
+  }
+})();
 const statusEl = document.getElementById('status');
 const listEl = document.getElementById('list');
 const msgsEl = document.getElementById('msgs');
