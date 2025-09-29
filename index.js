@@ -58,7 +58,9 @@ const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
 const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback").trim();
 
 // Use LeadConnector services host for OAuth (token + authorize)
-const OAUTH_BASE = "https://services.leadconnectorhq.com/oauth";
+// Use two hosts: marketplace for authorize, services for token
+const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
+const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
 // Shared secret for verifying your own inbound subscription calls (and/or marketplace webhook)
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
@@ -342,7 +344,7 @@ app.get("/oauth/start", (req, res) => {
     redirect_uri: GHL_REDIRECT_URI,
     scope,
   });
-  return res.redirect(`${OAUTH_BASE}/authorize?${params.toString()}`);
+  return res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 });
 
 // Handle OAuth callback and store tokens (in-memory for now)
@@ -364,10 +366,10 @@ app.get("/oauth/callback", async (req, res) => {
     });
 
     const tokenRes = await axios.post(
-      `${OAUTH_BASE}/token`,
-      body,
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 20000 }
-    );
+  `${OAUTH_TOKEN_BASE}/token`,
+  body,
+  { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 20000 }
+);
 
     const tokens = tokenRes.data || {};
     const locationId =
