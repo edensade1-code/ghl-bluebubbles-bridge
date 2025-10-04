@@ -1,5 +1,6 @@
 // index.js
-// All-in-one bridge for GHL ↔ BlueBubbles (iMessage), with OAuth and a minimal inbox UI.
+// Eden iMessage Bridge — GHL (HighLevel) ↔ BlueBubbles with OAuth, Conversation Provider delivery,
+// optional inbound forwarding to a workflow URL, and a minimal embedded inbox UI.
 
 import express from "express";
 import cors from "cors";
@@ -12,10 +13,23 @@ import qs from "querystring";
 
 const app = express();
 
-// Accept JSON + forms (GHL and misc callers)
-app.use(express.json({ limit: "1mb" }));
+/** ---------------- Middleware ---------------- **/
+
+// Capture raw body (useful for HMAC verification later)
+app.use(
+  express.json({
+    limit: "1mb",
+    verify: (req, _res, buf) => {
+      try {
+        req.rawBody = buf.toString("utf8");
+      } catch {
+        req.rawBody = "";
+      }
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
-app.use(bodyParser.text({ type: ["text/*"] }));
+app.use(bodyParser.text({ type: ["text/*"] })); // safety for odd callers
 
 // Allow iframing in GHL/LeadConnector
 app.use(
@@ -34,39 +48,60 @@ app.use(
     frameguard: { action: "sameorigin" },
   })
 );
+
+// CORS
 app.use(
   cors({
     origin: [/\.gohighlevel\.com$/, /\.leadconnectorhq\.com$/, /\.msgsndr\.com$/, /localhost/],
     credentials: true,
   })
 );
+
 app.use(morgan("tiny"));
 
+/** ---------------- Config ---------------- **/
 const PORT = Number(process.env.PORT || 8080);
 
-// BlueBubbles relay
-const BB_BASE  = (process.env.BB_BASE  || "https://relay.asapcashhomebuyers.com").trim();
-const BB_GUID  = (process.env.BB_GUID  || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
+// BlueBubbles
+const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
+const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// Optional forward of normalized inbound to your own GHL workflow webhook
+// Optional: forward normalized inbound to your own GHL workflow webhook
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
 // OAuth (HighLevel / LeadConnector)
-const CLIENT_ID        = (process.env.CLIENT_ID || "").trim();
-const CLIENT_SECRET    = (process.env.CLIENT_SECRET || "").trim();
-const GHL_REDIRECT_URI = (process.env.GHL_REDIRECT_URI || "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback").trim();
+const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
+const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
+const GHL_REDIRECT_URI = (
+  process.env.GHL_REDIRECT_URI ||
+  "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback"
+).trim();
 
-// OAuth hosts: marketplace for authorize, leadconnector services for token
+// OAuth hosts
 const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
-const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
+const OAUTH_TOKEN_BASE = "https://services.leadconnectorhq.com/oauth";
 
-// Optional shared secret (leave empty unless you control the caller headers)
+// Shared secret (used for Conversation Provider auth and optional HMAC)
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
 // Simple in-memory token store (swap for DB later)
-const tokenStore = new Map();
+const tokenStore = new Map(); // locationId -> tokens
 
-// ---- Helpers ---------------------------------------------------------------
+// Sanity logs
+if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
+  console.warn("[WARN] BB_GUID is not set. Set your BlueBubbles server password.");
+}
+if (!CLIENT_ID || !CLIENT_SECRET) {
+  console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
+}
+if (!GHL_SHARED_SECRET) {
+  console.log("[bridge] GHL_SHARED_SECRET not set (Bearer/HMAC checks disabled).");
+}
+if (!GHL_INBOUND_URL) {
+  console.log("[bridge] GHL_INBOUND_URL not set (inbound messages won’t be forwarded to a workflow).");
+}
+
+/** ---------------- Helpers ---------------- **/
 
 const newTempGuid = (prefix = "temp") =>
   `${prefix}-${crypto.randomBytes(6).toString("hex")}`;
@@ -79,11 +114,13 @@ const toE164US = (raw) => {
   if (String(raw).startsWith("+")) return String(raw);
   return null;
 };
+
 const ensureE164 = (phone) => {
   const e = toE164US(phone);
   if (!e) throw new Error("Invalid 'to' phone. Use E.164 like +13051234567");
   return e;
 };
+
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
 const bbPost = async (path, body) => {
@@ -103,29 +140,30 @@ const bbGet = async (path) => {
 const verifyGhlSignature = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const sigHex = req.header("X-GHL-Signature") || "";
-  let raw = "";
-  try {
-    if (req.is("application/json")) raw = JSON.stringify(req.body);
-    else if (req.is("application/x-www-form-urlencoded")) raw = qs.stringify(req.body);
-    else if (typeof req.body === "string") raw = req.body;
-    else raw = JSON.stringify(req.body ?? {});
-  } catch { raw = ""; }
+  const raw = req.rawBody || (() => {
+    // fallback (shouldn’t hit because we captured rawBody above)
+    try {
+      if (req.is("application/json")) return JSON.stringify(req.body);
+      if (req.is("application/x-www-form-urlencoded")) return qs.stringify(req.body);
+      if (typeof req.body === "string") return req.body;
+      return JSON.stringify(req.body ?? {});
+    } catch {
+      return "";
+    }
+  })();
   const expectedHex = crypto.createHmac("sha256", GHL_SHARED_SECRET).update(raw).digest("hex");
-  if (expectedHex.length !== sigHex.length) return false;
+  if (!sigHex || expectedHex.length !== sigHex.length) return false;
   return crypto.timingSafeEqual(Buffer.from(expectedHex, "hex"), Buffer.from(sigHex, "hex"));
 };
 
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
-
-  // Try Authorization header first
+  // Prefer Authorization header
   const auth = req.header("Authorization") || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
-
-  // Fallback: GHL sometimes sends ?key= on query string
+  // Fallback: ?key= on query
   if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true;
-
   return false;
 };
 
@@ -156,10 +194,10 @@ const extractToAndMessage = (body = {}) => {
   return { to, message };
 };
 
-// Single tolerant sender used by both endpoints
+/** ---------------- Core send handler (used by /provider/deliver and /send) ---------------- **/
 const handleProviderSend = async (req, res) => {
   try {
-    // Only enforce Bearer if you actually set GHL_SHARED_SECRET
+    // Only enforce Bearer/key if you actually set GHL_SHARED_SECRET
     if (GHL_SHARED_SECRET && !verifyBearer(req)) {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
@@ -205,7 +243,7 @@ const handleProviderSend = async (req, res) => {
   }
 };
 
-// ---- Routes ----------------------------------------------------------------
+/** ---------------- Routes ---------------- **/
 
 app.get("/", (_req, res) => {
   res.status(200).json({
@@ -214,7 +252,19 @@ app.get("/", (_req, res) => {
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
-    routes: ["/health","/send","/provider/deliver","/bb","/webhook","/api/chats","/api/messages","/app","/oauth/start","/oauth/callback","/oauth/debug"],
+    routes: [
+      "/health",
+      "/provider/deliver",
+      "/send",
+      "/bb",
+      "/webhook",
+      "/api/chats",
+      "/api/messages",
+      "/app",
+      "/oauth/start",
+      "/oauth/callback",
+      "/oauth/debug",
+    ],
   });
 });
 
@@ -227,13 +277,13 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-// Conversation Provider Delivery URL (point Marketplace to this)
+// Conversation Provider Delivery URL (use this in the Marketplace “Delivery URL”)
 app.post("/provider/deliver", handleProviderSend);
 
-// Keep /send working for tests and other callers
+// Keep /send for tests (Postman, etc.)
 app.post("/send", handleProviderSend);
 
-// BB passthrough
+// BlueBubbles passthrough
 app.post("/bb", async (req, res) => {
   try {
     const { path, body } = req.body || {};
@@ -251,10 +301,10 @@ app.post("/bb", async (req, res) => {
 // Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
 app.post("/webhook", async (req, res) => {
   try {
-    // Log once so we can see the exact shape
+    // Log once so we can see exact shape
     try { console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2)); } catch {}
 
-    // Allow GHL Trigger subscription pings (Bearer)
+    // Allow GHL Trigger subscription pings (Bearer/key)
     if (verifyBearer(req)) {
       return res.status(200).json({ ok: true });
     }
@@ -292,8 +342,7 @@ app.post("/webhook", async (req, res) => {
     const evtName =
       src.event || src.type || src.name || (messageText ? "new-message" : "webhook");
 
-    // OPTIONAL: skip echoing your own outbound messages back into GHL
-    // (you can comment this out if you want everything forwarded)
+    // Skip echoing your own outbound messages back into GHL (optional)
     if (isFromMe) {
       console.log("[bridge] /webhook: own-message (ignored)", messageText);
       return res.status(200).json({ ok: true, ignored: "isFromMe" });
@@ -310,7 +359,6 @@ app.post("/webhook", async (req, res) => {
       receivedAt: new Date().toISOString(),
     };
 
-    // Forward to your internal GHL inbound webhook if configured
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(GHL_INBOUND_URL, normalized, {
@@ -329,6 +377,7 @@ app.post("/webhook", async (req, res) => {
     return res.status(200).json({ ok: true });
   }
 });
+
 // Optional: signed marketplace webhook
 app.post("/ghl/webhook", (req, res) => {
   try {
@@ -341,7 +390,7 @@ app.post("/ghl/webhook", (req, res) => {
   }
 });
 
-// ---- OAuth (HL / LeadConnector) -------------------------------------------
+/** ---------------- OAuth (HL / LeadConnector) ---------------- **/
 
 app.get("/oauth/start", (req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
@@ -392,7 +441,7 @@ app.get("/oauth/debug", (_req, res) => {
   res.json({ ok: true, locationsWithTokens: Array.from(tokenStore.keys()) });
 });
 
-// ---- Minimal embedded UI ---------------------------------------------------
+/** ---------------- Minimal embedded UI ---------------- **/
 
 app.get("/api/chats", async (_req, res) => {
   try {
@@ -459,8 +508,7 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 </body></html>`);
 });
 
-// ---- Start -----------------------------------------------------------------
-
+/** ---------------- Start ---------------- **/
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
   console.log(`[bridge] BB_BASE = ${BB_BASE}`);
@@ -468,4 +516,3 @@ app.listen(PORT, () => {
   if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
   if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
 });
-
