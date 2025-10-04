@@ -298,85 +298,77 @@ app.post("/bb", async (req, res) => {
   }
 });
 
-// Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
+// Inbound webhook (from BlueBubbles → send to GHL Conversations)
 app.post("/webhook", async (req, res) => {
   try {
-    // Log once so we can see exact shape
-    try { console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2)); } catch {}
-
-    // Allow GHL Trigger subscription pings (Bearer/key)
-    if (verifyBearer(req)) {
-      return res.status(200).json({ ok: true });
-    }
+    console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2));
 
     const src = req.body || {};
     const data = src.data || {};
+    const isFromMe = Boolean(data.isFromMe ?? false);
+    const text = data.text || data.message?.text || src.text || "";
 
-    // BlueBubbles fields (per your logs)
-    const messageText =
-      data.text ??
-      data.message?.text ??
-      src.text ??
-      null;
+    // Ignore outbound echoes
+    if (isFromMe || !text) {
+      console.log("[bridge] inbound ignored (isFromMe or empty)");
+      return res.status(200).json({ ok: true });
+    }
 
     const fromNumber =
-      data.handle?.address ??
-      data.message?.handle?.address ??
-      src.from ??
+      data.handle?.address ||
+      data.message?.handle?.address ||
+      src.from ||
       null;
 
     const chatGuid =
-      data.chats?.[0]?.guid ??
-      data.chat?.guid ??
+      data.chats?.[0]?.guid ||
+      data.chat?.guid ||
       null;
-
-    const toNumber =
-      data.chats?.[0]?.lastAddressedHandle ??
-      data.to ??
-      null;
-
-    const isFromMe = Boolean(
-      data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
-    );
-
-    const evtName =
-      src.event || src.type || src.name || (messageText ? "new-message" : "webhook");
-
-    // Skip echoing your own outbound messages back into GHL (optional)
-    if (isFromMe) {
-      console.log("[bridge] /webhook: own-message (ignored)", messageText);
-      return res.status(200).json({ ok: true, ignored: "isFromMe" });
-    }
 
     const normalized = {
-      event: evtName,
-      messageText,
-      from: fromNumber,
-      to: toNumber,
+      fromNumber,
+      text,
       chatGuid,
-      isFromMe,
-      raw: src,
       receivedAt: new Date().toISOString(),
     };
 
-    if (GHL_INBOUND_URL) {
-      try {
-        await axios.post(GHL_INBOUND_URL, normalized, {
-          headers: { "Content-Type": "application/json" },
-          timeout: 10000,
-        });
-      } catch (e) {
-        console.error("[bridge] forward to GHL failed:", e?.message);
-      }
+    console.log("[bridge] inbound message from:", fromNumber, "text:", text);
+
+    // Find any stored token
+    const locationId = Array.from(tokenStore.keys())[0];
+    const tokens = tokenStore.get(locationId);
+
+    if (!tokens?.access_token) {
+      console.warn("[bridge] No GHL token available; skipping push");
+      return res.status(200).json({ ok: true, warning: "no_token" });
     }
 
-    console.log("[bridge] /webhook:", evtName, messageText, { from: fromNumber, chatGuid, isFromMe });
-    return res.status(200).json({ ok: true });
+    // Push to GHL Conversations API
+    const ghlPayload = {
+      type: "SMS",
+      message: text,
+      fromPhone: fromNumber,
+      contactPhone: fromNumber,
+      direction: "INBOUND",
+    };
+
+    const ghlUrl = `https://services.leadconnectorhq.com/conversations/messages/`;
+    await axios.post(ghlUrl, ghlPayload, {
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "Version": "2021-07-28",
+        "Content-Type": "application/json",
+      },
+    });
+
+    console.log("[bridge] ✅ Forwarded inbound iMessage to GHL conversations");
+    res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[bridge] /webhook error:", err?.message);
-    return res.status(200).json({ ok: true });
+    res.status(200).json({ ok: false, error: err?.message });
   }
 });
+
 
 // Optional: signed marketplace webhook
 app.post("/ghl/webhook", (req, res) => {
