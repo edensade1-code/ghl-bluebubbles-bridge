@@ -251,34 +251,84 @@ app.post("/bb", async (req, res) => {
 // Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
 app.post("/webhook", async (req, res) => {
   try {
-    if (verifyBearer(req)) return res.status(200).json({ ok: true }); // subscription ping
+    // ✅ TEMP: log raw inbound payload to see exact shape
+    try {
+      console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2));
+    } catch {}
 
-    const event = req.body || {};
-    const evtName = event?.event || event?.type || event?.name || (event?.data?.message ? "new-message" : "webhook");
+    // ✅ Allow GHL subscription ping (Bearer)
+    if (verifyBearer(req)) {
+      return res.status(200).json({ ok: true });
+    }
+
+    // --- tolerant normalization (covers BlueBubbles & misc shapes) ---
+    const src = req.body || {};
+    const eventName = src.event || src.type || src.name || "new-message";
+
+    // find message object in several possible places
+    const m =
+      src?.data?.message ??
+      src?.message ??
+      src?.payload?.message ??
+      src?.payload ??
+      src;
+
+    // detect message text in multiple property names
+    const messageText =
+      m?.text ??
+      m?.body ??
+      m?.message ??
+      m?.content ??
+      m?.attributedBody?.string ??
+      null;
+
+    // detect sender/handle/number
+    const fromNumber =
+      m?.handle?.address ??
+      m?.sender?.address ??
+      m?.from ??
+      m?.sender ??
+      null;
+
+    // detect chat GUID and recipient
+    const chatGuid =
+      m?.chats?.[0]?.guid ??
+      src?.data?.chat?.guid ??
+      m?.chatGuid ??
+      null;
+
+    const toNumber =
+      m?.chats?.[0]?.lastAddressedHandle ??
+      m?.to ??
+      null;
 
     const normalized = {
-      event: evtName,
-      messageText: event?.data?.message?.text ?? event?.message?.text ?? event?.message ?? null,
-      from: event?.data?.message?.handle?.address ?? event?.message?.handle?.address ?? null,
-      to:   event?.data?.message?.chats?.[0]?.lastAddressedHandle ?? null,
-      chatGuid: event?.data?.message?.chats?.[0]?.guid ?? event?.data?.chat?.guid ?? null,
-      raw: event,
+      event: eventName,
+      messageText,
+      from: fromNumber,
+      to: toNumber,
+      chatGuid,
+      raw: src,
       receivedAt: new Date().toISOString(),
     };
 
+    // ✅ optional: forward normalized inbound to your own GHL workflow
     if (GHL_INBOUND_URL) {
       try {
-        await axios.post(GHL_INBOUND_URL, normalized, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
+        await axios.post(GHL_INBOUND_URL, normalized, {
+          headers: { "Content-Type": "application/json" },
+          timeout: 10000,
+        });
       } catch (e) {
         console.error("[bridge] forward to GHL failed:", e?.message);
       }
     }
 
-    console.log("[bridge] /webhook:", evtName, normalized.messageText);
-    res.status(200).json({ ok: true });
+    console.log("[bridge] /webhook:", eventName, messageText);
+    return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[bridge] /webhook error:", err?.message);
-    res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true });
   }
 });
 
