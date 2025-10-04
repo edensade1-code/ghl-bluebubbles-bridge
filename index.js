@@ -102,6 +102,100 @@ if (!GHL_INBOUND_URL) {
 }
 
 /** ---------------- Helpers ---------------- **/
+// ===== LeadConnector API helpers =====
+const LC_API = "https://services.leadconnectorhq.com";
+const LC_VERSION = "2021-07-28"; // required header
+
+const getAnyLocation = () => {
+  const first = tokenStore.entries().next();
+  if (first.done) return null;
+  const [locationId, tokens] = first.value;
+  return { locationId, tokens };
+};
+
+const lcHeaders = (accessToken) => ({
+  "Authorization": `Bearer ${accessToken}`,
+  "Content-Type": "application/json",
+  "Accept": "application/json",
+  "Version": LC_VERSION,
+});
+
+// naive refresh if you want later; for now just use access_token we have
+const getAccessTokenFor = (locationId) => {
+  const row = tokenStore.get(locationId);
+  return row?.access_token || null;
+};
+
+// Find or create a contact by phone
+const upsertContactByPhone = async (locationId, accessToken, e164Phone) => {
+  // 1) try search by phone
+  try {
+    const r = await axios.get(
+      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
+    if (hit?.id) return hit.id;
+  } catch (_) {}
+
+  // 2) create minimal contact
+  const createBody = {
+    locationId,
+    // HighLevel expects one of: phone, phoneNumbers, etc.; phone is commonly accepted
+    phone: e164Phone,
+    name: e164Phone, // placeholder name
+  };
+  const cr = await axios.post(`${LC_API}/contacts/`, createBody, {
+    headers: lcHeaders(accessToken),
+    timeout: 15000,
+  });
+  return cr?.data?.id || cr?.data?.contact?.id;
+};
+
+// Push inbound message into Conversations
+const pushInboundMessage = async ({
+  locationId,
+  accessToken,
+  contactId,
+  text,
+  fromNumber,   // customer number (sender)
+  toNumber,     // your iMessage number (optional)
+}) => {
+  // Many installs accept this shape on /conversations/messages
+  const body = {
+    locationId,
+    contactId,
+    // channel/type metadata:
+    type: "SMS",                 // GHL treats provider channels as SMS-like
+    direction: "inbound",
+    message: text,
+    fromNumber,
+    toNumber,
+    provider: "iMessage (EDEN)", // label for clarity
+  };
+
+  try {
+    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
+      headers: lcHeaders(accessToken),
+      timeout: 20000,
+    });
+    return r.data;
+  } catch (e) {
+    // Fallback: some accounts prefer a different field name for text
+    try {
+      const alt = { ...body, text: text };
+      const r2 = await axios.post(`${LC_API}/conversations/messages`, alt, {
+        headers: lcHeaders(accessToken),
+        timeout: 20000,
+      });
+      return r2.data;
+    } catch (e2) {
+      console.error("[inbound->GHL] failed:", e?.response?.status, e?.response?.data || e.message);
+      throw e2;
+    }
+  }
+};
+
 
 const newTempGuid = (prefix = "temp") =>
   `${prefix}-${crypto.randomBytes(6).toString("hex")}`;
@@ -298,76 +392,116 @@ app.post("/bb", async (req, res) => {
   }
 });
 
-// Inbound webhook (from BlueBubbles → send to GHL Conversations)
+// Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
 app.post("/webhook", async (req, res) => {
   try {
-    console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2));
+    // 0) Allow GHL Trigger subscription pings (they include your Bearer)
+    if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
-    const src = req.body || {};
+    // 1) Parse BlueBubbles payload (your logs show this exact shape)
+    const src  = req.body || {};
     const data = src.data || {};
-    const isFromMe = Boolean(data.isFromMe ?? false);
-    const text = data.text || data.message?.text || src.text || "";
-
-    // Ignore outbound echoes
-    if (isFromMe || !text) {
-      console.log("[bridge] inbound ignored (isFromMe or empty)");
-      return res.status(200).json({ ok: true });
-    }
+    const messageText =
+      data.text ??
+      data.message?.text ??
+      src.text ??
+      null;
 
     const fromNumber =
-      data.handle?.address ||
-      data.message?.handle?.address ||
-      src.from ||
+      data.handle?.address ??
+      data.message?.handle?.address ??
+      src.from ??
       null;
 
     const chatGuid =
-      data.chats?.[0]?.guid ||
-      data.chat?.guid ||
+      data.chats?.[0]?.guid ??
+      data.chat?.guid ??
       null;
 
-    const normalized = {
-      fromNumber,
-      text,
-      chatGuid,
-      receivedAt: new Date().toISOString(),
-    };
+    const toNumber =
+      data.chats?.[0]?.chatIdentifier ??
+      data.chats?.[0]?.lastAddressedHandle ??
+      data.to ??
+      null;
 
-    console.log("[bridge] inbound message from:", fromNumber, "text:", text);
+    const isFromMe = Boolean(
+      data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
+    );
 
-    // Find any stored token
-    const locationId = Array.from(tokenStore.keys())[0];
-    const tokens = tokenStore.get(locationId);
-
-    if (!tokens?.access_token) {
-      console.warn("[bridge] No GHL token available; skipping push");
-      return res.status(200).json({ ok: true, warning: "no_token" });
+    // 2) Ignore echoes of your own outbound (optional)
+    if (isFromMe) {
+      console.log("[bridge] /webhook: own-message (ignored)", messageText);
+      return res.status(200).json({ ok: true, ignored: "isFromMe" });
     }
 
-    // Push to GHL Conversations API
-    const ghlPayload = {
-      type: "SMS",
-      message: text,
-      fromPhone: fromNumber,
-      contactPhone: fromNumber,
-      direction: "INBOUND",
-    };
+    // 3) Make sure we have a location & token to talk to GHL
+    const any = getAnyLocation();
+    if (!any) {
+      console.error("[inbound->GHL] no OAuth tokens saved yet (install the app first)");
+      return res.status(200).json({ ok: true, note: "no-oauth" });
+    }
+    const { locationId, tokens } = any;
+    const accessToken = getAccessTokenFor(locationId);
+    if (!accessToken) {
+      console.error("[inbound->GHL] missing access_token for location", locationId);
+      return res.status(200).json({ ok: true, note: "no-access-token" });
+    }
 
-    const ghlUrl = `https://services.leadconnectorhq.com/conversations/messages/`;
-    await axios.post(ghlUrl, ghlPayload, {
-      headers: {
-        Authorization: `Bearer ${tokens.access_token}`,
-        "Version": "2021-07-28",
-        "Content-Type": "application/json",
-      },
+    // 4) Normalize/validate
+    if (!messageText || !fromNumber) {
+      console.log("[inbound->GHL] missing message or fromNumber", { messageText, fromNumber });
+      return res.status(200).json({ ok: true });
+    }
+
+    // 5) Ensure a contact exists for the sender (by phone)
+    const e164 = ensureE164(fromNumber);
+    const contactId = await upsertContactByPhone(locationId, accessToken, e164);
+
+    // 6) Push the inbound into HighLevel Conversations
+    const pushed = await pushInboundMessage({
+      locationId,
+      accessToken,
+      contactId,
+      text: messageText,
+      fromNumber: e164,
+      toNumber: toNumber || null,
     });
 
-    console.log("[bridge] ✅ Forwarded inbound iMessage to GHL conversations");
-    res.status(200).json({ ok: true });
+    console.log("[inbound->GHL] delivered", {
+      locationId,
+      contactId,
+      chatGuid,
+      len: messageText.length,
+    });
+
+    // (Optional) also forward to your own webhook if configured
+    if (GHL_INBOUND_URL) {
+      const normalized = {
+        event: "incoming-imessage",
+        messageText,
+        from: e164,
+        to: toNumber || null,
+        chatGuid,
+        receivedAt: new Date().toISOString(),
+      };
+      try {
+        await axios.post(GHL_INBOUND_URL, normalized, {
+          headers: { "Content-Type": "application/json" },
+          timeout: 10000,
+        });
+      } catch (e) {
+        console.error("[bridge] forward to GHL_INBOUND_URL failed:", e?.message);
+      }
+    }
+
+    return res.status(200).json({ ok: true, pushed });
   } catch (err) {
-    console.error("[bridge] /webhook error:", err?.message);
-    res.status(200).json({ ok: false, error: err?.message });
+    console.error("[bridge] /webhook error:", err?.response?.data || err.message);
+    // Always 200 so BlueBubbles doesn’t retry forever
+    return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
+
 
 
 // Optional: signed marketplace webhook
