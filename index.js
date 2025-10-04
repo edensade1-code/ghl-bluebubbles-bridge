@@ -251,68 +251,66 @@ app.post("/bb", async (req, res) => {
 // Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
 app.post("/webhook", async (req, res) => {
   try {
-    // ✅ TEMP: log raw inbound payload to see exact shape
-    try {
-      console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2));
-    } catch {}
+    // Log once so we can see the exact shape
+    try { console.log("[webhook] raw body:", JSON.stringify(req.body, null, 2)); } catch {}
 
-    // ✅ Allow GHL subscription ping (Bearer)
+    // Allow GHL Trigger subscription pings (Bearer)
     if (verifyBearer(req)) {
       return res.status(200).json({ ok: true });
     }
 
-    // --- tolerant normalization (covers BlueBubbles & misc shapes) ---
     const src = req.body || {};
-    const eventName = src.event || src.type || src.name || "new-message";
+    const data = src.data || {};
 
-    // find message object in several possible places
-    const m =
-      src?.data?.message ??
-      src?.message ??
-      src?.payload?.message ??
-      src?.payload ??
-      src;
-
-    // detect message text in multiple property names
+    // BlueBubbles fields (per your logs)
     const messageText =
-      m?.text ??
-      m?.body ??
-      m?.message ??
-      m?.content ??
-      m?.attributedBody?.string ??
+      data.text ??
+      data.message?.text ??
+      src.text ??
       null;
 
-    // detect sender/handle/number
     const fromNumber =
-      m?.handle?.address ??
-      m?.sender?.address ??
-      m?.from ??
-      m?.sender ??
+      data.handle?.address ??
+      data.message?.handle?.address ??
+      src.from ??
       null;
 
-    // detect chat GUID and recipient
     const chatGuid =
-      m?.chats?.[0]?.guid ??
-      src?.data?.chat?.guid ??
-      m?.chatGuid ??
+      data.chats?.[0]?.guid ??
+      data.chat?.guid ??
       null;
 
     const toNumber =
-      m?.chats?.[0]?.lastAddressedHandle ??
-      m?.to ??
+      data.chats?.[0]?.lastAddressedHandle ??
+      data.to ??
       null;
 
+    const isFromMe = Boolean(
+      data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
+    );
+
+    const evtName =
+      src.event || src.type || src.name || (messageText ? "new-message" : "webhook");
+
+    // OPTIONAL: skip echoing your own outbound messages back into GHL
+    // (you can comment this out if you want everything forwarded)
+    if (isFromMe) {
+      console.log("[bridge] /webhook: own-message (ignored)", messageText);
+      return res.status(200).json({ ok: true, ignored: "isFromMe" });
+    }
+
     const normalized = {
-      event: eventName,
+      event: evtName,
       messageText,
       from: fromNumber,
       to: toNumber,
       chatGuid,
+      isFromMe,
       raw: src,
       receivedAt: new Date().toISOString(),
     };
 
-    // ✅ optional: forward normalized inbound to your own GHL workflow
+    // Forward to your internal GHL inbound webhook if configured
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(GHL_INBOUND_URL, normalized, {
@@ -324,14 +322,13 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    console.log("[bridge] /webhook:", eventName, messageText);
+    console.log("[bridge] /webhook:", evtName, messageText, { from: fromNumber, chatGuid, isFromMe });
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("[bridge] /webhook error:", err?.message);
     return res.status(200).json({ ok: true });
   }
 });
-
 // Optional: signed marketplace webhook
 app.post("/ghl/webhook", (req, res) => {
   try {
