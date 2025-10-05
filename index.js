@@ -151,6 +151,20 @@ const upsertContactByPhone = async (locationId, accessToken, e164Phone) => {
   });
   return cr?.data?.id || cr?.data?.contact?.id;
 };
+// Find existing contact by phone (no create)
+const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
+  try {
+    const r = await axios.get(
+      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
+    return hit?.id || null;
+  } catch (e) {
+    console.error("[findContactIdByPhone] search failed:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+};
 
 // Push inbound message into Conversations (mirror only if contact exists)
 const pushInboundMessage = async ({
