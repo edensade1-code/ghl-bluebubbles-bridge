@@ -213,21 +213,53 @@ const getAccessTokenFor = (locationId) => {
   return row?.access_token || null;
 };
 
-// Find existing contact by phone (NO CREATE) — requires contacts.read or contacts.readonly
+// Find existing contact by phone (no create) — tolerant to formatting
 const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
+  const digits = (s) => String(s || "").replace(/\D/g, "");
+  const want10 = digits(e164Phone).slice(-10); // "9082655248"
+
+  // 1) Try exact normalized match first
   try {
-    const r = await axios.get(
+    const r1 = await axios.get(
       `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
       { headers: lcHeaders(accessToken), timeout: 15000 }
     );
-    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
-    return hit?.id || null;
+    const exact = r1?.data?.contacts?.[0] || r1?.data?.contact || null;
+    if (exact?.id) return exact.id;
   } catch (e) {
-    const code = e?.response?.status;
-    const body = e?.response?.data;
-    console.error("[findContactIdByPhone] search failed:", code, body || e.message);
-    return null;
+    // non-fatal
   }
+
+  // 2) Fallback: broad search by query, then compare digits-only
+  try {
+    const r2 = await axios.get(
+      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(want10)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    const list = Array.isArray(r2?.data?.contacts) ? r2.data.contacts : (r2?.data?.contact ? [r2.data.contact] : []);
+    for (const c of list) {
+      const phones = new Set();
+
+      if (c.phone) phones.add(digits(c.phone));
+      if (Array.isArray(c.phoneNumbers)) {
+        for (const p of c.phoneNumbers) phones.add(digits(p?.number || p));
+      }
+      // Some payloads put phone numbers under "contact" fields differently; be defensive:
+      if (Array.isArray(c.additionals)) {
+        for (const a of c.additionals) {
+          if (a?.type?.toLowerCase?.() === "phone" && a?.value) phones.add(digits(a.value));
+        }
+      }
+
+      for (const d of phones) {
+        if (d.endsWith(want10)) return c.id; // match last 10 digits
+      }
+    }
+  } catch (e) {
+    console.error("[findContactIdByPhone] tolerant search failed:", e?.response?.status, e?.response?.data || e.message);
+  }
+
+  return null;
 };
 
 // Push inbound message into Conversations (mirror existing contacts only)
