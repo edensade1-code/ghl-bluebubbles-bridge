@@ -602,7 +602,10 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 //  NOTE: do not early-return here. We’ll map direction below.
-
+if (!messageText || !fromNumberRaw) {
+  console.log("[inbound] missing messageText/fromNumber:", { messageText, fromNumberRaw });
+  return res.status(200).json({ ok: true });
+}
     // OAuth presence
     const any = getAnyLocation();
     if (!any) {
