@@ -17,27 +17,29 @@ import bodyParser from "body-parser";
 const app = express();
 
 /* ------------------------------- Middleware ------------------------------- */
-app.use(
-  express.json({
-    limit: "1mb",
-    verify: (req, _res, buf) => {
-      try { req.rawBody = buf.toString("utf8"); } catch { req.rawBody = ""; }
-    },
-  })
-);
-app.use(express.urlencoded({ extended: true }));
-app.use(bodyParser.text({ type: ["text/*"] }));
-
+// Helmet (allow embedding in GHL iframes)
 app.use(
   helmet({
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
-        "frame-ancestors": ["'self'", "*.gohighlevel.com", "*.leadconnectorhq.com", "*.msgsndr.com"],
+        // allow HighLevel to embed our app
+        "frame-ancestors": [
+          "'self'",
+          "*.gohighlevel.com",
+          "*.leadconnectorhq.com",
+          "*.msgsndr.com",
+          "marketplace.gohighlevel.com"
+        ],
+        // keep inline script for the tiny /app UI
         "script-src": ["'self'", "'unsafe-inline'"],
       },
     },
-    frameguard: { action: "sameorigin" },
+    // IMPORTANT: disable X-Frame-Options so CSP controls framing
+    frameguard: false,
+    // Loosen these so the GHL preview doesn’t get blocked
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
   })
 );
 
