@@ -430,6 +430,15 @@ app.post("/webhook", async (req, res) => {
     const chatGuid =
       data.chats?.[0]?.guid ?? data.chat?.guid ?? null;
 
+    // 👇 **CRITICAL**: ignore BlueBubbles echoes of your own outbound iMessages
+    const isFromMe = Boolean(
+      data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
+    );
+    if (isFromMe) {
+      console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
+      return res.status(200).json({ ok: true, ignored: "isFromMe" });
+    }
+
     // We derive the contact's phone (the human sender) from fromNumberRaw
     if (!messageText || !fromNumberRaw) {
       console.log("[inbound] missing messageText/fromNumber:", { messageText, fromNumberRaw });
@@ -470,16 +479,14 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
-    // Push inbound to GHL:
-    //   fromNumber = YOUR LOCATION LINE (must belong to the Location)
-    //   toNumber   = CONTACT'S NUMBER
+    // Post to GHL using the parking number as identity so GHL accepts it
     const pushed = await pushInboundMessage({
       locationId,
       accessToken,
       contactId,
       text: messageText,
-      fromNumber: businessFromNumber, // <- Location number
-      toNumber: contactE164,          // <- Contact number
+      fromNumber: businessFromNumber, // location line (parking number)
+      toNumber: contactE164,          // the human's number
     });
 
     if (!pushed) {
@@ -520,17 +527,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Optional signed marketplace webhook
-app.post("/ghl/webhook", (req, res) => {
-  try {
-    if (!verifyGhlSignature(req)) return res.status(401).json({ ok: false, error: "Invalid signature" });
-    console.log("[bridge] /ghl/webhook verified");
-    res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error("[ghl/webhook] error:", e?.message);
-    res.status(200).json({ ok: true });
-  }
-});
 
 /* -------------------------------------------------------------------------- */
 /* OAuth (LeadConnector)                                                      */
