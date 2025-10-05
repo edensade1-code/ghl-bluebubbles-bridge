@@ -392,18 +392,21 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 };
 
 // Push inbound message into Conversations (mirror existing contacts only)
+// Push an iMessage into GHL Conversations (now supports inbound/outbound)
 const pushInboundMessage = async ({
   locationId,
+  accessToken,
   contactId,
   text,
   fromNumber,
   toNumber,
+  direction = "inbound", // default inbound
 }) => {
   const body = {
     locationId,
     contactId,
     type: "SMS",
-    direction: "inbound",
+    direction,          // pass direction explicitly
     message: text,
     fromNumber,
     toNumber,
@@ -411,17 +414,13 @@ const pushInboundMessage = async ({
   };
 
   try {
-    const r = await withLcCall(locationId, (access) =>
-      axios.post(`${LC_API}/conversations/messages`, body, {
-        headers: lcHeaders(access),
-        timeout: 20000,
-      })
-    );
+    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
+      headers: lcHeaders(accessToken),
+      timeout: 20000,
+    });
     return r.data;
   } catch (e) {
-    const status = e?.response?.status;
-    const data = e?.response?.data;
-    console.error("[inbound->GHL] push failed:", status, data || e.message);
+    console.error("[inbound->GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
     return null;
   }
 };
@@ -649,14 +648,35 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
-    // Push inbound into Conversations using Location's line as identity
-    const pushed = await pushInboundMessage({
-      locationId,
-      contactId,
-      text: messageText,
-      fromNumber: identityNumber,  // the Location’s number (parking/business)
-      toNumber: contactE164,       // the human’s number
-    });
+ // Decide message direction & identities based on isFromMe
+const isFromMe = Boolean(
+  data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
+);
+
+let direction, fromNumber, toNumber;
+
+// If the human sent it → inbound (left side in GHL)
+if (!isFromMe) {
+  direction  = "inbound";
+  fromNumber = contactE164;
+  toNumber   = businessFromNumber;
+}
+// If you sent it from your own iPhone → outbound (right side in GHL)
+else {
+  direction  = "outbound";
+  fromNumber = businessFromNumber;
+  toNumber   = contactE164;
+}
+
+const pushed = await pushInboundMessage({
+  locationId,
+  accessToken,
+  contactId,
+  text: messageText,
+  fromNumber,
+  toNumber,
+  direction,
+});
 
     if (!pushed) {
       console.error("[inbound] push returned null (check scopes and /conversations/messages access).");
