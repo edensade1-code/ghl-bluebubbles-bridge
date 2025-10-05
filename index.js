@@ -2,7 +2,7 @@
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
 // - Outbound: Conversation Provider delivery → BlueBubbles send
 // - Inbound: BlueBubbles webhook → mirror into GHL Conversations (ONLY if contact already exists)
-// - OAuth: LeadConnector (marketplace authorize + services token)
+// - OAuth: LeadConnector (marketplace authorize + services token) with token persistence
 // - Minimal embedded inbox UI (optional)
 
 import express from "express";
@@ -13,6 +13,7 @@ import axios from "axios";
 import crypto from "crypto";
 import bodyParser from "body-parser";
 import qs from "querystring";
+import fs from "fs/promises";
 
 const app = express();
 
@@ -48,7 +49,7 @@ app.use(
         "script-src": ["'self'", "'unsafe-inline'"],
       },
     },
-    frameguard: { action: "sameorigin" }, // CSP frame-ancestors will govern modern browsers
+    frameguard: { action: "sameorigin" },
   })
 );
 
@@ -88,8 +89,36 @@ const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 // Shared secret used by Conversation Provider (Authorization: Bearer) and optional ?key=
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
-// In-memory token store (swap for DB later if needed)
+// Token persistence
+const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
+
+// In-memory token store (now persisted to disk)
 const tokenStore = new Map(); // locationId -> tokens
+
+async function loadTokenStore() {
+  try {
+    const buf = await fs.readFile(TOKENS_FILE, "utf8");
+    const arr = JSON.parse(buf); // [["locationId", {access_token,...}], ...]
+    if (Array.isArray(arr)) {
+      tokenStore.clear();
+      for (const [loc, tok] of arr) tokenStore.set(loc, tok);
+      console.log(`[oauth] loaded ${tokenStore.size} location token(s) from ${TOKENS_FILE}`);
+    }
+  } catch {
+    // file missing or invalid; start empty
+  }
+}
+
+async function saveTokenStore() {
+  try {
+    const arr = Array.from(tokenStore.entries());
+    await fs.writeFile(TOKENS_FILE, JSON.stringify(arr, null, 2), "utf8");
+    // small log to confirm saves without spamming
+    console.log(`[oauth] tokens persisted to ${TOKENS_FILE}`);
+  } catch (e) {
+    console.error("[oauth] failed to persist tokens:", e?.message);
+  }
+}
 
 // Sanity logs
 if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
@@ -240,7 +269,7 @@ const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
 
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
       for (const c of list) {
-        // Check common phone fields
+        // Collect candidate phone fields
         const candidates = new Set();
 
         if (c.phone) candidates.add(c.phone);
@@ -251,7 +280,7 @@ const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
             else if (pn?.number) candidates.add(pn.number);
           }
         }
-        if (Array.isArray(c.contacts)) { // some payloads nest strangely
+        if (Array.isArray(c.contacts)) {
           for (const sub of c.contacts) {
             if (sub?.phone) candidates.add(sub.phone);
           }
@@ -271,7 +300,7 @@ const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
         e?.response?.status,
         e?.response?.data || e.message
       );
-      // keep looping other queries
+      // try next query
     }
   }
   return null;
@@ -378,6 +407,7 @@ app.get("/", (_req, res) => {
       "/send",
       "/bb",
       "/webhook",
+      "/debug/contact",
       "/api/chats",
       "/api/messages",
       "/app",
@@ -404,6 +434,7 @@ app.get("/health", async (_req, res) => {
     });
   }
 });
+
 // --- Debug: look up a contact by phone via the same helper the webhook uses ---
 app.get("/debug/contact", async (req, res) => {
   try {
@@ -630,6 +661,7 @@ app.get("/oauth/callback", async (req, res) => {
     const tokens = tokenRes.data || {};
     const locationId = tokens.locationId || tokens.location_id || tokens.location || "default";
     tokenStore.set(locationId, tokens);
+    await saveTokenStore();
 
     console.log("[oauth] tokens saved for location:", locationId, {
       haveAccess:  !!tokens.access_token,
@@ -647,7 +679,7 @@ app.get("/oauth/callback", async (req, res) => {
 });
 
 app.get("/oauth/debug", (_req, res) => {
-  res.json({ ok: true, locationsWithTokens: Array.from(tokenStore.keys()) });
+  res.json({ ok: true, locationsWithTokens: Array.from(tokenStore.keys()), tokensFile: TOKENS_FILE });
 });
 
 /** ------------------------------------------------------------------------
@@ -722,9 +754,12 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 /** ------------------------------------------------------------------------
  * Start
  * ---------------------------------------------------------------------- */
+await loadTokenStore();
+
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
   console.log(`[bridge] BB_BASE = ${BB_BASE}`);
+  console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
   if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
   if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
   if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
