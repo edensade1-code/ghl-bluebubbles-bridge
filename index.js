@@ -522,8 +522,21 @@ app.get("/oauth/start", (req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
-  const scope = ["conversations.read","conversations.write","contacts.read","locations.read"].join(" ");
-  const params = new URLSearchParams({ client_id: CLIENT_ID, response_type: "code", redirect_uri: GHL_REDIRECT_URI, scope });
+
+  // Scopes: message access only, no contact creation permissions
+  const scope = [
+    "conversations.readonly",
+    "conversations.write",
+    "locations.readonly"
+  ].join(" ");
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: GHL_REDIRECT_URI,
+    scope,
+  });
+
   res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 });
 
