@@ -621,23 +621,22 @@ app.get("/oauth/start", (_req, res) => {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
 
-  // Read/write conversations, read-only contacts (for lookup), read-only locations
-  const scope = [
-    "conversations.readonly",
-    "conversations.write",
-    "contacts.readonly",
-    "locations.readonly",
-  ].join(" ");
+// Read/write message-level, read-only contacts & locations
+const scope = [
+  "conversations/message.write",
+  "conversations/message.readonly",
+  "contacts.readonly",
+  "locations.readonly"
+].join(" ");
 
-  const params = new URLSearchParams({
-    client_id: CLIENT_ID,
-    response_type: "code",
-    redirect_uri: GHL_REDIRECT_URI,
-    scope,
-  });
-
-  res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
+const params = new URLSearchParams({
+  client_id: CLIENT_ID,
+  response_type: "code",
+  redirect_uri: GHL_REDIRECT_URI,
+  scope,
 });
+
+res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 
 app.get("/oauth/callback", async (req, res) => {
   try {
