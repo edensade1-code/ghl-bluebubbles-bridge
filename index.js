@@ -213,52 +213,67 @@ const getAccessTokenFor = (locationId) => {
   return row?.access_token || null;
 };
 
-// Find existing contact by phone (no create) — tolerant to formatting
+// Find existing contact by phone (no create) — uses /contacts?query= and normalizes phones
 const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
-  const digits = (s) => String(s || "").replace(/\D/g, "");
-  const want10 = digits(e164Phone).slice(-10); // "9082655248"
+  const digits = (e164Phone || "").replace(/\D/g, "");
+  const last10 = digits.slice(-10);
 
-  // 1) Try exact normalized match first
-  try {
-    const r1 = await axios.get(
-      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    const exact = r1?.data?.contacts?.[0] || r1?.data?.contact || null;
-    if (exact?.id) return exact.id;
-  } catch (e) {
-    // non-fatal
-  }
+  const tryQueries = [
+    e164Phone,           // +19082655248
+    digits,              // 19082655248
+    last10,              // 9082655248
+    `(${last10.slice(0,3)}) ${last10.slice(3,6)}-${last10.slice(6)}`, // (908) 265-5248
+  ];
 
-  // 2) Fallback: broad search by query, then compare digits-only
-  try {
-    const r2 = await axios.get(
-      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(want10)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    const list = Array.isArray(r2?.data?.contacts) ? r2.data.contacts : (r2?.data?.contact ? [r2.data.contact] : []);
-    for (const c of list) {
-      const phones = new Set();
+  const normalize = (p) => {
+    if (!p) return null;
+    const d = String(p).replace(/\D/g, "");
+    if (d.length >= 11 && d.startsWith("1")) return `+${d}`;
+    if (d.length === 10) return `+1${d}`;
+    return d ? `+${d}` : null;
+  };
 
-      if (c.phone) phones.add(digits(c.phone));
-      if (Array.isArray(c.phoneNumbers)) {
-        for (const p of c.phoneNumbers) phones.add(digits(p?.number || p));
-      }
-      // Some payloads put phone numbers under "contact" fields differently; be defensive:
-      if (Array.isArray(c.additionals)) {
-        for (const a of c.additionals) {
-          if (a?.type?.toLowerCase?.() === "phone" && a?.value) phones.add(digits(a.value));
+  for (const q of tryQueries) {
+    try {
+      const url = `${LC_API}/contacts/?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(q)}`;
+      const r = await axios.get(url, { headers: lcHeaders(accessToken), timeout: 15000 });
+
+      const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
+      for (const c of list) {
+        // Check common phone fields
+        const candidates = new Set();
+
+        if (c.phone) candidates.add(c.phone);
+        if (Array.isArray(c.phoneNumbers)) {
+          for (const pn of c.phoneNumbers) {
+            if (typeof pn === "string") candidates.add(pn);
+            else if (pn?.phone) candidates.add(pn.phone);
+            else if (pn?.number) candidates.add(pn.number);
+          }
+        }
+        if (Array.isArray(c.contacts)) { // some payloads nest strangely
+          for (const sub of c.contacts) {
+            if (sub?.phone) candidates.add(sub.phone);
+          }
+        }
+
+        for (const cand of candidates) {
+          const n = normalize(cand);
+          if (n && n === normalize(e164Phone)) {
+            return c.id || c._id || null;
+          }
         }
       }
-
-      for (const d of phones) {
-        if (d.endsWith(want10)) return c.id; // match last 10 digits
-      }
+    } catch (e) {
+      console.error(
+        "[findContactIdByPhone] query failed:",
+        q,
+        e?.response?.status,
+        e?.response?.data || e.message
+      );
+      // keep looping other queries
     }
-  } catch (e) {
-    console.error("[findContactIdByPhone] tolerant search failed:", e?.response?.status, e?.response?.data || e.message);
   }
-
   return null;
 };
 
@@ -387,6 +402,27 @@ app.get("/health", async (_req, res) => {
       relay: BB_BASE,
       error: e?.response?.data ?? e?.message ?? "Ping failed",
     });
+  }
+});
+// --- Debug: look up a contact by phone via the same helper the webhook uses ---
+app.get("/debug/contact", async (req, res) => {
+  try {
+    const any = getAnyLocation();
+    if (!any) return res.status(200).json({ ok: false, error: "no-oauth" });
+
+    const { locationId } = any;
+    const accessToken = getAccessTokenFor(locationId);
+    if (!accessToken) return res.status(200).json({ ok: false, error: "no-access-token" });
+
+    const raw = req.query.phone || "";
+    const normalized = (raw || "").replace(/\D/g, "").length === 10
+      ? `+1${(raw || "").replace(/\D/g, "")}`
+      : raw;
+
+    const id = await findContactIdByPhone(locationId, accessToken, normalized);
+    res.json({ ok: true, locationId, searched: normalized, foundContactId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message });
   }
 });
 
