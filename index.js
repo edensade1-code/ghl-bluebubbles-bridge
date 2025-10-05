@@ -11,7 +11,6 @@ import helmet from "helmet";
 import morgan from "morgan";
 import axios from "axios";
 import crypto from "crypto";
-import bodyParser from "body-parser";
 import qs from "querystring";
 import fs from "fs/promises";
 
@@ -29,8 +28,9 @@ app.use(
     },
   })
 );
+// Safety net for odd callers that post text/*
+app.use(express.text({ type: ["text/*"], limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(bodyParser.text({ type: ["text/*"] })); // safety net
 
 // Helmet (allow embedding in GHL iframes)
 app.use(
@@ -38,14 +38,13 @@ app.use(
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
-        // Allow GHL/LeadConnector to iframe this app
         "frame-ancestors": [
           "'self'",
           "*.gohighlevel.com",
           "*.leadconnectorhq.com",
           "*.msgsndr.com",
         ],
-        // Allow inline <script> in /app (UI uses inline JS)
+        // allow the inline script in /app
         "script-src": ["'self'", "'unsafe-inline'"],
       },
     },
@@ -92,7 +91,7 @@ const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 // Token persistence
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
 
-// In-memory token store (now persisted to disk)
+// In-memory token store (persisted to disk)
 const tokenStore = new Map(); // locationId -> tokens
 
 async function loadTokenStore() {
@@ -113,7 +112,6 @@ async function saveTokenStore() {
   try {
     const arr = Array.from(tokenStore.entries());
     await fs.writeFile(TOKENS_FILE, JSON.stringify(arr, null, 2), "utf8");
-    // small log to confirm saves without spamming
     console.log(`[oauth] tokens persisted to ${TOKENS_FILE}`);
   } catch (e) {
     console.error("[oauth] failed to persist tokens:", e?.message);
@@ -236,7 +234,6 @@ const getAnyLocation = () => {
   return { locationId, tokens };
 };
 
-// (naive) get access token for a location
 const getAccessTokenFor = (locationId) => {
   const row = tokenStore.get(locationId);
   return row?.access_token || null;
@@ -269,9 +266,7 @@ const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
 
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
       for (const c of list) {
-        // Collect candidate phone fields
         const candidates = new Set();
-
         if (c.phone) candidates.add(c.phone);
         if (Array.isArray(c.phoneNumbers)) {
           for (const pn of c.phoneNumbers) {
@@ -281,26 +276,17 @@ const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
           }
         }
         if (Array.isArray(c.contacts)) {
-          for (const sub of c.contacts) {
-            if (sub?.phone) candidates.add(sub.phone);
-          }
+          for (const sub of c.contacts) if (sub?.phone) candidates.add(sub.phone);
         }
 
         for (const cand of candidates) {
           const n = normalize(cand);
-          if (n && n === normalize(e164Phone)) {
-            return c.id || c._id || null;
-          }
+          if (n && n === normalize(e164Phone)) return c.id || c._id || null;
         }
       }
     } catch (e) {
-      console.error(
-        "[findContactIdByPhone] query failed:",
-        q,
-        e?.response?.status,
-        e?.response?.data || e.message
-      );
-      // try next query
+      console.error("[findContactIdByPhone] query failed:", q, e?.response?.status, e?.response?.data || e.message);
+      // continue with the next query
     }
   }
   return null;
@@ -343,13 +329,9 @@ const pushInboundMessage = async ({
  * ---------------------------------------------------------------------- */
 const handleProviderSend = async (req, res) => {
   try {
-    // Enforce secret only if configured
     if (GHL_SHARED_SECRET && !verifyBearer(req)) {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
-
-    console.log("[provider] inbound headers:", req.headers);
-    console.log("[provider] inbound payload:", req.body);
 
     let { to, message } = extractToAndMessage(req.body || {});
     if (!to) to = req.query.to;
@@ -421,21 +403,14 @@ app.get("/", (_req, res) => {
 // Health
 app.get("/health", async (_req, res) => {
   try {
-    const pong = await axios.get(
-      `${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`,
-      { timeout: 8000 }
-    );
+    const pong = await axios.get(`${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`, { timeout: 8000 });
     res.status(200).json({ ok: true, relay: BB_BASE, ping: pong.data ?? null });
   } catch (e) {
-    res.status(503).json({
-      ok: false,
-      relay: BB_BASE,
-      error: e?.response?.data ?? e?.message ?? "Ping failed",
-    });
+    res.status(503).json({ ok: false, relay: BB_BASE, error: e?.response?.data ?? e?.message ?? "Ping failed" });
   }
 });
 
-// --- Debug: look up a contact by phone via the same helper the webhook uses ---
+// Debug: look up a contact by phone via the same helper the webhook uses
 app.get("/debug/contact", async (req, res) => {
   try {
     const any = getAnyLocation();
@@ -474,18 +449,15 @@ app.post("/bb", async (req, res) => {
     res.status(200).json({ ok: true, relay: BB_BASE, data });
   } catch (err) {
     const status = err?.response?.status ?? 500;
-    res.status(status).json({
-      ok: false,
-      relay: BB_BASE,
-      error: err?.response?.data ?? err?.message ?? "Unknown error",
-    });
+    res.status(status).json({ ok: false, relay: BB_BASE, error: err?.response?.data ?? err?.message ?? "Unknown error" });
   }
 });
 
 // Inbound webhook from BlueBubbles (and GHL trigger ping via Bearer/?key)
+app.get("/webhook", (_req, res) => res.status(200).json({ ok: true, method: "GET", note: "use POST for events" }));
 app.post("/webhook", async (req, res) => {
   try {
-    // Let GHL trigger subscription pings pass (they include your Bearer)
+    // Let GHL trigger subscription pings pass (they include your Bearer or ?key)
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
     // Based on your BlueBubbles logs
@@ -562,7 +534,7 @@ app.post("/webhook", async (req, res) => {
     });
 
     if (!pushed) {
-      console.error("[inbound] push returned null (check conversations.write permission).");
+      console.error("[inbound] push returned null (check scopes and /conversations/messages access).");
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
@@ -573,7 +545,7 @@ app.post("/webhook", async (req, res) => {
       preview: messageText.slice(0, 32),
     });
 
-    // Optional extra forward (kept for completeness; no-op if env is blank)
+    // Optional extra forward (no-op if env is blank)
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(
@@ -621,22 +593,23 @@ app.get("/oauth/start", (_req, res) => {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
 
-// Read/write message-level, read-only contacts & locations
-const scope = [
-  "conversations/message.write",
-  "conversations/message.readonly",
-  "contacts.readonly",
-  "locations.readonly"
-].join(" ");
+  // Read/write message-level, read-only contacts & locations
+  const scope = [
+    "conversations/message.write",
+    "conversations/message.readonly",
+    "contacts.readonly",
+    "locations.readonly",
+  ].join(" ");
 
-const params = new URLSearchParams({
-  client_id: CLIENT_ID,
-  response_type: "code",
-  redirect_uri: GHL_REDIRECT_URI,
-  scope,
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: GHL_REDIRECT_URI,
+    scope,
+  });
+
+  res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 });
-
-res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 
 app.get("/oauth/callback", async (req, res) => {
   try {
@@ -753,13 +726,19 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 /** ------------------------------------------------------------------------
  * Start
  * ---------------------------------------------------------------------- */
-await loadTokenStore();
+(async () => {
+  try {
+    await loadTokenStore();
+  } catch (e) {
+    console.warn("[oauth] token load skipped:", e?.message || e);
+  }
 
-app.listen(PORT, () => {
-  console.log(`[bridge] listening on :${PORT}`);
-  console.log(`[bridge] BB_BASE = ${BB_BASE}`);
-  console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
-  if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
-  if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
-  if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
-});
+  app.listen(PORT, () => {
+    console.log(`[bridge] listening on :${PORT}`);
+    console.log(`[bridge] BB_BASE = ${BB_BASE}`);
+    console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
+    if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
+    if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
+    if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
+  });
+})();
