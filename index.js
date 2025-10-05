@@ -599,9 +599,14 @@ app.post("/webhook", async (req, res) => {
       null;
 
             const isFromMe = Boolean(
-      data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
-    );
-//  NOTE: do not early-return here. We’ll map direction below.
+  data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
+);
+
+// If message originated from my own iPhone, ignore it to avoid echo/duplication.
+if (isFromMe) {
+  console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
+  return res.status(200).json({ ok: true, ignored: "from-me" });
+}
 if (!messageText || !fromNumberRaw) {
   console.log("[inbound] missing messageText/fromNumber:", { messageText, fromNumberRaw });
   return res.status(200).json({ ok: true });
