@@ -486,6 +486,9 @@ app.post("/webhook", async (req, res) => {
       data.chats?.[0]?.lastAddressedHandle ??
       data.to ??
       null;
+    // Use a true business number if you have one; otherwise leave null for iMessage
+const BUSINESS_NUMBER = process.env.BUSINESS_NUMBER ? ensureE164(process.env.BUSINESS_NUMBER) : null;
+const safeToNumber = BUSINESS_NUMBER || null;
 
     const isFromMe = Boolean(
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
@@ -524,14 +527,14 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Push inbound into Conversations
-    const pushed = await pushInboundMessage({
-      locationId,
-      accessToken,
-      contactId,
-      text: messageText,
-      fromNumber: e164,
-      toNumber: toNumber || null,
-    });
+const pushed = await pushInboundMessage({
+  locationId,
+  accessToken,
+  contactId,
+  text: messageText,
+  fromNumber: e164,       // contact’s number
+  toNumber: safeToNumber, // business number or omitted
+});
 
     if (!pushed) {
       console.error("[inbound] push returned null (check scopes and /conversations/messages access).");
