@@ -655,19 +655,23 @@ if (!messageText || !fromNumberRaw) {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // Map BlueBubbles direction to GHL:
-    // - If human (contact) sent it → inbound (left)
-    // - If you sent it from your iPhone → outbound (right)
-    let direction, fromNumber, toNumber;
-    if (!isFromMe) {
-      direction  = "inbound";
-      fromNumber = contactE164;    // contact’s number
-      toNumber   = identityNumber; // your Location identity (parking/business)
-    } else {
-      direction  = "outbound";
-      fromNumber = identityNumber; // your Location identity (parking/business)
-      toNumber   = contactE164;    // contact’s number
-    }
+    // Map BlueBubbles direction to GHL (IMPORTANT: toNumber MUST be contact's phone)
+let direction, fromNumber, toNumber;
+if (isFromMe) {
+  // You → contact (right bubble)
+  direction  = "outbound";
+} else {
+  // Contact → you (left bubble)
+  direction  = "inbound";
+}
+// GHL expects toNumber to equal the contact's phone on the contact record.
+// fromNumber should be your identity (parking/business) number.
+fromNumber = identityNumber;
+toNumber   = contactE164;
+
+console.log("[inbound] map", {
+  isFromMe, identityNumber, contactE164, direction, fromNumber, toNumber, chatGuid
+});
 
     const pushed = await pushInboundMessage({
       locationId,
