@@ -598,13 +598,10 @@ app.post("/webhook", async (req, res) => {
       data.chat?.guid ??
       null;
 
-    const isFromMe = Boolean(
+        const isFromMe = Boolean(
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
-    if (isFromMe) {
-      console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
-      return res.status(200).json({ ok: true, ignored: "isFromMe" });
-    }
+//  NOTE: do not early-return here. We use isFromMe below to set direction.
 
     if (!messageText || !fromNumberRaw) {
       console.log("[inbound] missing messageText/fromNumber:", { messageText, fromNumberRaw });
@@ -648,35 +645,36 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
- // Decide message direction & identities based on isFromMe
-const isFromMe = Boolean(
-  data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
-);
+    // Acquire a valid access token for this location (with auto-refresh)
+    const accessToken = await getValidAccessToken(locationId);
+    if (!accessToken) {
+      console.error("[inbound] unable to obtain access token for location", locationId);
+      return res.status(200).json({ ok: true, note: "no-access-token" });
+    }
 
-let direction, fromNumber, toNumber;
+    // Map BlueBubbles direction to GHL:
+    // - If human (contact) sent it → inbound (left)
+    // - If you sent it from your iPhone → outbound (right)
+    let direction, fromNumber, toNumber;
+    if (!isFromMe) {
+      direction  = "inbound";
+      fromNumber = contactE164;    // contact’s number
+      toNumber   = identityNumber; // your Location identity (parking/business)
+    } else {
+      direction  = "outbound";
+      fromNumber = identityNumber; // your Location identity (parking/business)
+      toNumber   = contactE164;    // contact’s number
+    }
 
-// If the human sent it → inbound (left side in GHL)
-if (!isFromMe) {
-  direction  = "inbound";
-  fromNumber = contactE164;
-  toNumber   = businessFromNumber;
-}
-// If you sent it from your own iPhone → outbound (right side in GHL)
-else {
-  direction  = "outbound";
-  fromNumber = businessFromNumber;
-  toNumber   = contactE164;
-}
-
-const pushed = await pushInboundMessage({
-  locationId,
-  accessToken,
-  contactId,
-  text: messageText,
-  fromNumber,
-  toNumber,
-  direction,
-});
+    const pushed = await pushInboundMessage({
+      locationId,
+      accessToken,
+      contactId,
+      text: messageText,
+      fromNumber,
+      toNumber,
+      direction,
+    });
 
     if (!pushed) {
       console.error("[inbound] push returned null (check scopes and /conversations/messages access).");
