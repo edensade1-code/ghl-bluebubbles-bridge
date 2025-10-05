@@ -1,6 +1,9 @@
 // index.js
-// Eden iMessage Bridge — GHL (HighLevel) ↔ BlueBubbles with OAuth, Conversation Provider delivery,
-// optional inbound forwarding to a workflow URL, and a minimal embedded inbox UI.
+// Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
+// - Outbound: Conversation Provider delivery → BlueBubbles send
+// - Inbound: BlueBubbles webhook → mirror into GHL Conversations (ONLY if contact already exists)
+// - OAuth: LeadConnector (marketplace authorize + services token)
+// - Minimal embedded inbox UI (optional)
 
 import express from "express";
 import cors from "cors";
@@ -13,39 +16,39 @@ import qs from "querystring";
 
 const app = express();
 
-/** ---------------- Middleware ---------------- **/
-
-// Capture raw body (useful for HMAC verification later)
+/** ------------------------------------------------------------------------
+ * Middleware
+ * ---------------------------------------------------------------------- */
+// Capture raw JSON body (useful if you enable signed webhooks later)
 app.use(
   express.json({
     limit: "1mb",
     verify: (req, _res, buf) => {
-      try {
-        req.rawBody = buf.toString("utf8");
-      } catch {
-        req.rawBody = "";
-      }
+      try { req.rawBody = buf.toString("utf8"); } catch { req.rawBody = ""; }
     },
   })
 );
 app.use(express.urlencoded({ extended: true }));
-app.use(bodyParser.text({ type: ["text/*"] })); // safety for odd callers
+app.use(bodyParser.text({ type: ["text/*"] })); // safety net
 
-// Allow iframing in GHL/LeadConnector
+// Helmet (allow embedding in GHL iframes)
 app.use(
   helmet({
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
+        // Allow GHL/LeadConnector to iframe this app
         "frame-ancestors": [
           "'self'",
           "*.gohighlevel.com",
           "*.leadconnectorhq.com",
           "*.msgsndr.com",
         ],
+        // Allow inline <script> in /app (UI uses inline JS)
+        "script-src": ["'self'", "'unsafe-inline'"],
       },
     },
-    frameguard: { action: "sameorigin" },
+    frameguard: { action: "sameorigin" }, // CSP frame-ancestors will govern modern browsers
   })
 );
 
@@ -59,17 +62,19 @@ app.use(
 
 app.use(morgan("tiny"));
 
-/** ---------------- Config ---------------- **/
+/** ------------------------------------------------------------------------
+ * Config
+ * ---------------------------------------------------------------------- */
 const PORT = Number(process.env.PORT || 8080);
 
-// BlueBubbles
+// BlueBubbles relay
 const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
 const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// Optional: forward normalized inbound to your own GHL workflow webhook
+// Optional: also forward normalized inbound to your own webhook (kept off for “pure app”)
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
-// OAuth (HighLevel / LeadConnector)
+// OAuth (LeadConnector)
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
 const GHL_REDIRECT_URI = (
@@ -77,14 +82,13 @@ const GHL_REDIRECT_URI = (
   "https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback"
 ).trim();
 
-// OAuth hosts
 const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
-const OAUTH_TOKEN_BASE = "https://services.leadconnectorhq.com/oauth";
+const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
-// Shared secret (used for Conversation Provider auth and optional HMAC)
+// Shared secret used by Conversation Provider (Authorization: Bearer) and optional ?key=
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
-// Simple in-memory token store (swap for DB later)
+// In-memory token store (swap for DB later if needed)
 const tokenStore = new Map(); // locationId -> tokens
 
 // Sanity logs
@@ -95,111 +99,15 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
 }
 if (!GHL_SHARED_SECRET) {
-  console.log("[bridge] GHL_SHARED_SECRET not set (Bearer/HMAC checks disabled).");
+  console.log("[bridge] GHL_SHARED_SECRET not set (Bearer/key checks disabled).");
 }
 if (!GHL_INBOUND_URL) {
-  console.log("[bridge] GHL_INBOUND_URL not set (inbound messages won’t be forwarded to a workflow).");
+  console.log("[bridge] GHL_INBOUND_URL not set (no additional forwarding — pure app mode).");
 }
 
-/** ---------------- Helpers ---------------- **/
-// ===== LeadConnector API helpers =====
-const LC_API = "https://services.leadconnectorhq.com";
-const LC_VERSION = "2021-07-28"; // required header
-
-const getAnyLocation = () => {
-  const first = tokenStore.entries().next();
-  if (first.done) return null;
-  const [locationId, tokens] = first.value;
-  return { locationId, tokens };
-};
-
-const lcHeaders = (accessToken) => ({
-  "Authorization": `Bearer ${accessToken}`,
-  "Content-Type": "application/json",
-  "Accept": "application/json",
-  "Version": LC_VERSION,
-});
-
-// naive refresh if you want later; for now just use access_token we have
-const getAccessTokenFor = (locationId) => {
-  const row = tokenStore.get(locationId);
-  return row?.access_token || null;
-};
-
-// Find or create a contact by phone
-const upsertContactByPhone = async (locationId, accessToken, e164Phone) => {
-  // 1) try search by phone
-  try {
-    const r = await axios.get(
-      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
-    if (hit?.id) return hit.id;
-  } catch (_) {}
-
-  // 2) create minimal contact
-  const createBody = {
-    locationId,
-    // HighLevel expects one of: phone, phoneNumbers, etc.; phone is commonly accepted
-    phone: e164Phone,
-    name: e164Phone, // placeholder name
-  };
-  const cr = await axios.post(`${LC_API}/contacts/`, createBody, {
-    headers: lcHeaders(accessToken),
-    timeout: 15000,
-  });
-  return cr?.data?.id || cr?.data?.contact?.id;
-};
-// Find existing contact by phone (no create)
-const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
-  try {
-    const r = await axios.get(
-      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
-    return hit?.id || null;
-  } catch (e) {
-    console.error("[findContactIdByPhone] search failed:", e?.response?.status, e?.response?.data || e.message);
-    return null;
-  }
-};
-
-// Push inbound message into Conversations (mirror only if contact exists)
-const pushInboundMessage = async ({
-  locationId,
-  accessToken,
-  contactId,
-  text,
-  fromNumber,
-  toNumber,
-}) => {
-  const body = {
-    locationId,
-    contactId,
-    type: "SMS",                 // iMessage mirrored as SMS-like
-    direction: "inbound",
-    message: text,
-    fromNumber,
-    toNumber,
-    provider: "iMessage (EDEN)",
-  };
-
-  try {
-    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
-      headers: lcHeaders(accessToken),
-      timeout: 20000,
-    });
-    return r.data;
-  } catch (e) {
-    console.error("[inbound->GHL] failed to push message:", e?.response?.status, e?.response?.data || e.message);
-    return null;
-  }
-};
-
-
-
+/** ------------------------------------------------------------------------
+ * Helpers (general)
+ * ---------------------------------------------------------------------- */
 const newTempGuid = (prefix = "temp") =>
   `${prefix}-${crypto.randomBytes(6).toString("hex")}`;
 
@@ -211,15 +119,14 @@ const toE164US = (raw) => {
   if (String(raw).startsWith("+")) return String(raw);
   return null;
 };
-
 const ensureE164 = (phone) => {
   const e = toE164US(phone);
   if (!e) throw new Error("Invalid 'to' phone. Use E.164 like +13051234567");
   return e;
 };
-
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
+// BlueBubbles low-level
 const bbPost = async (path, body) => {
   const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
   const { data } = await axios.post(url, body, {
@@ -234,37 +141,26 @@ const bbGet = async (path) => {
   return data;
 };
 
+// Shared-secret auth checks
+const verifyBearer = (req) => {
+  if (!GHL_SHARED_SECRET) return true;
+  const auth = req.header("Authorization") || "";
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
+  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true; // fallback
+  return false;
+};
 const verifyGhlSignature = (req) => {
+  // Optional HMAC if you wire marketplace webhooks to /ghl/webhook
   if (!GHL_SHARED_SECRET) return true;
   const sigHex = req.header("X-GHL-Signature") || "";
-  const raw = req.rawBody || (() => {
-    // fallback (shouldn’t hit because we captured rawBody above)
-    try {
-      if (req.is("application/json")) return JSON.stringify(req.body);
-      if (req.is("application/x-www-form-urlencoded")) return qs.stringify(req.body);
-      if (typeof req.body === "string") return req.body;
-      return JSON.stringify(req.body ?? {});
-    } catch {
-      return "";
-    }
-  })();
+  const raw = req.rawBody || "";
   const expectedHex = crypto.createHmac("sha256", GHL_SHARED_SECRET).update(raw).digest("hex");
   if (!sigHex || expectedHex.length !== sigHex.length) return false;
   return crypto.timingSafeEqual(Buffer.from(expectedHex, "hex"), Buffer.from(sigHex, "hex"));
 };
 
-const verifyBearer = (req) => {
-  if (!GHL_SHARED_SECRET) return true;
-  // Prefer Authorization header
-  const auth = req.header("Authorization") || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
-  // Fallback: ?key= on query
-  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true;
-  return false;
-};
-
-// Extract flexible fields GHL might send
+// Extract flexible fields GHL might send on provider deliver
 const extractToAndMessage = (body = {}) => {
   const to =
     body.to ||
@@ -291,10 +187,87 @@ const extractToAndMessage = (body = {}) => {
   return { to, message };
 };
 
-/** ---------------- Core send handler (used by /provider/deliver and /send) ---------------- **/
+/** ------------------------------------------------------------------------
+ * LeadConnector (GHL) API helpers
+ * ---------------------------------------------------------------------- */
+const LC_API = "https://services.leadconnectorhq.com";
+const LC_VERSION = "2021-07-28"; // required header on LC APIs
+
+const lcHeaders = (accessToken) => ({
+  "Authorization": `Bearer ${accessToken}`,
+  "Content-Type": "application/json",
+  "Accept": "application/json",
+  "Version": LC_VERSION,
+});
+
+const getAnyLocation = () => {
+  const first = tokenStore.entries().next();
+  if (first.done) return null;
+  const [locationId, tokens] = first.value;
+  return { locationId, tokens };
+};
+
+// (naive) get access token for a location
+const getAccessTokenFor = (locationId) => {
+  const row = tokenStore.get(locationId);
+  return row?.access_token || null;
+};
+
+// Find existing contact by phone (NO CREATE) — requires contacts.read or contacts.readonly
+const findContactIdByPhone = async (locationId, accessToken, e164Phone) => {
+  try {
+    const r = await axios.get(
+      `${LC_API}/contacts/search?locationId=${encodeURIComponent(locationId)}&phone=${encodeURIComponent(e164Phone)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    const hit = r?.data?.contacts?.[0] || r?.data?.contact || null;
+    return hit?.id || null;
+  } catch (e) {
+    const code = e?.response?.status;
+    const body = e?.response?.data;
+    console.error("[findContactIdByPhone] search failed:", code, body || e.message);
+    return null;
+  }
+};
+
+// Push inbound message into Conversations (mirror existing contacts only)
+const pushInboundMessage = async ({
+  locationId,
+  accessToken,
+  contactId,
+  text,
+  fromNumber,
+  toNumber,
+}) => {
+  const body = {
+    locationId,
+    contactId,
+    type: "SMS",           // GHL treats custom providers like SMS-like channels
+    direction: "inbound",
+    message: text,
+    fromNumber,
+    toNumber,
+    provider: "iMessage (EDEN)",
+  };
+
+  try {
+    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
+      headers: lcHeaders(accessToken),
+      timeout: 20000,
+    });
+    return r.data;
+  } catch (e) {
+    console.error("[inbound->GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+};
+
+/** ------------------------------------------------------------------------
+ * Send handler (used by both /provider/deliver and /send)
+ * ---------------------------------------------------------------------- */
 const handleProviderSend = async (req, res) => {
   try {
-    // Only enforce Bearer/key if you actually set GHL_SHARED_SECRET
+    // Enforce secret only if configured
     if (GHL_SHARED_SECRET && !verifyBearer(req)) {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
@@ -340,8 +313,11 @@ const handleProviderSend = async (req, res) => {
   }
 };
 
-/** ---------------- Routes ---------------- **/
+/** ------------------------------------------------------------------------
+ * Routes
+ * ---------------------------------------------------------------------- */
 
+// Root
 app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
@@ -365,22 +341,30 @@ app.get("/", (_req, res) => {
   });
 });
 
+// Health
 app.get("/health", async (_req, res) => {
   try {
-    const pong = await axios.get(`${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`, { timeout: 8000 });
+    const pong = await axios.get(
+      `${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`,
+      { timeout: 8000 }
+    );
     res.status(200).json({ ok: true, relay: BB_BASE, ping: pong.data ?? null });
   } catch (e) {
-    res.status(503).json({ ok: false, relay: BB_BASE, error: e?.response?.data ?? e?.message ?? "Ping failed" });
+    res.status(503).json({
+      ok: false,
+      relay: BB_BASE,
+      error: e?.response?.data ?? e?.message ?? "Ping failed",
+    });
   }
 });
 
-// Conversation Provider Delivery URL (use this in the Marketplace “Delivery URL”)
+// Conversation Provider Delivery URL (point your Marketplace provider here)
 app.post("/provider/deliver", handleProviderSend);
 
-// Keep /send for tests (Postman, etc.)
+// Keep /send for Postman/manual tests
 app.post("/send", handleProviderSend);
 
-// BlueBubbles passthrough
+// Power-user passthrough to BlueBubbles REST
 app.post("/bb", async (req, res) => {
   try {
     const { path, body } = req.body || {};
@@ -391,17 +375,21 @@ app.post("/bb", async (req, res) => {
     res.status(200).json({ ok: true, relay: BB_BASE, data });
   } catch (err) {
     const status = err?.response?.status ?? 500;
-    res.status(status).json({ ok: false, relay: BB_BASE, error: err?.response?.data ?? err?.message ?? "Unknown error" });
+    res.status(status).json({
+      ok: false,
+      relay: BB_BASE,
+      error: err?.response?.data ?? err?.message ?? "Unknown error",
+    });
   }
 });
 
-// Inbound webhook from BlueBubbles (and GHL trigger ping via Bearer)
+// Inbound webhook from BlueBubbles (and GHL trigger ping via Bearer/?key)
 app.post("/webhook", async (req, res) => {
   try {
-    // Allow GHL Trigger subscription pings (they include your Bearer)
+    // Let GHL trigger subscription pings pass (they include your Bearer)
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
-    // --- Parse BlueBubbles payload (based on your logs) ---
+    // Based on your BlueBubbles logs
     const src  = req.body || {};
     const data = src.data || {};
 
@@ -432,7 +420,7 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // Ignore our own outbounds
+    // Ignore our own outbound echoes
     if (isFromMe) {
       console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
       return res.status(200).json({ ok: true, ignored: "isFromMe" });
@@ -443,29 +431,28 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // --- OAuth token presence ---
+    // Ensure we have an OAuth token saved
     const any = getAnyLocation();
     if (!any) {
-      console.error("[inbound] no OAuth tokens saved (reinstall sub-account).");
+      console.error("[inbound] no OAuth tokens saved (install the app into the sub-account and complete /oauth/start).");
       return res.status(200).json({ ok: true, note: "no-oauth" });
     }
-    const { locationId, tokens } = any;
+    const { locationId } = any;
     const accessToken = getAccessTokenFor(locationId);
     if (!accessToken) {
       console.error("[inbound] missing access_token for location", locationId);
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // --- Only mirror if contact exists (no auto-create) ---
+    // Only mirror if this phone already exists as a contact in CRM (no auto-create)
     const e164 = ensureE164(fromNumber);
     const contactId = await findContactIdByPhone(locationId, accessToken, e164);
-
     if (!contactId) {
       console.log("[inbound] contact not found in CRM; dropping (by design).", { locationId, from: e164 });
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
-    // --- Push into Conversations ---
+    // Push inbound into Conversations
     const pushed = await pushInboundMessage({
       locationId,
       accessToken,
@@ -475,6 +462,11 @@ app.post("/webhook", async (req, res) => {
       toNumber: toNumber || null,
     });
 
+    if (!pushed) {
+      console.error("[inbound] push returned null (check conversations.write permission).");
+      return res.status(200).json({ ok: true, note: "push-failed" });
+    }
+
     console.log("[inbound] delivered → conversations:", {
       locationId,
       contactId,
@@ -482,17 +474,21 @@ app.post("/webhook", async (req, res) => {
       preview: messageText.slice(0, 32),
     });
 
-    // Optional: also forward to your own webhook (if you set it)
+    // Optional extra forward (kept for completeness; no-op if env is blank)
     if (GHL_INBOUND_URL) {
       try {
-        await axios.post(GHL_INBOUND_URL, {
-          event: "incoming-imessage",
-          messageText,
-          from: e164,
-          to: toNumber || null,
-          chatGuid,
-          receivedAt: new Date().toISOString(),
-        }, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
+        await axios.post(
+          GHL_INBOUND_URL,
+          {
+            event: "incoming-imessage",
+            messageText,
+            from: e164,
+            to: toNumber || null,
+            chatGuid,
+            receivedAt: new Date().toISOString(),
+          },
+          { headers: { "Content-Type": "application/json" }, timeout: 10000 }
+        );
       } catch (e) {
         console.error("[inbound] forward to GHL_INBOUND_URL failed:", e?.message);
       }
@@ -501,12 +497,12 @@ app.post("/webhook", async (req, res) => {
     return res.status(200).json({ ok: true, pushed });
   } catch (err) {
     console.error("[inbound] /webhook error:", err?.response?.data || err.message);
+    // Always 200 so BlueBubbles doesn't retry forever
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
 
-
-// Optional: signed marketplace webhook
+// (Optional) signed marketplace webhooks
 app.post("/ghl/webhook", (req, res) => {
   try {
     if (!verifyGhlSignature(req)) return res.status(401).json({ ok: false, error: "Invalid signature" });
@@ -518,18 +514,20 @@ app.post("/ghl/webhook", (req, res) => {
   }
 });
 
-/** ---------------- OAuth (HL / LeadConnector) ---------------- **/
-
-app.get("/oauth/start", (req, res) => {
+/** ------------------------------------------------------------------------
+ * OAuth (LeadConnector)
+ * ---------------------------------------------------------------------- */
+app.get("/oauth/start", (_req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
 
-  // Scopes: message access only, no contact creation permissions
+  // Read/write conversations, read-only contacts (for lookup), read-only locations
   const scope = [
     "conversations.readonly",
     "conversations.write",
-    "locations.readonly"
+    "contacts.readonly",
+    "locations.readonly",
   ].join(" ");
 
   const params = new URLSearchParams({
@@ -544,9 +542,9 @@ app.get("/oauth/start", (req, res) => {
 
 app.get("/oauth/callback", async (req, res) => {
   try {
-    const { code, error, error_description } = req.query;
+    const { code, error } = req.query;
     if (error) return res.status(400).send("OAuth denied. Please try again.");
-    if (!code)   return res.status(400).send("Missing authorization code.");
+    if (!code)  return res.status(400).send("Missing authorization code.");
 
     const body = qs.stringify({
       client_id: CLIENT_ID,
@@ -571,7 +569,9 @@ app.get("/oauth/callback", async (req, res) => {
       expiresIn: tokens.expires_in,
     });
 
-    return res.status(200).send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh"><div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:560px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.3)"><h1>✅ Eden iMessage connected</h1><p>You can close this window and return to HighLevel.</p><div style="margin-top:10px;background:#16a34a;color:#fff;padding:8px 12px;border-radius:8px">Location: ${locationId}</div></div><script>setTimeout(()=>{window.close?.();},1500)</script></body></html>`);
+    return res
+      .status(200)
+      .send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh"><div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:560px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.3)"><h1>✅ Eden iMessage connected</h1><p>You can close this window and return to HighLevel.</p><div style="margin-top:10px;background:#16a34a;color:#fff;padding:8px 12px;border-radius:8px">Location: ${locationId}</div></div><script>setTimeout(()=>{window.close?.();},1500)</script></body></html>`);
   } catch (e) {
     console.error("[oauth] callback error:", e?.response?.status, e?.response?.data || e.message);
     res.status(500).send("OAuth error. Check server logs for details.");
@@ -582,8 +582,9 @@ app.get("/oauth/debug", (_req, res) => {
   res.json({ ok: true, locationsWithTokens: Array.from(tokenStore.keys()) });
 });
 
-/** ---------------- Minimal embedded UI ---------------- **/
-
+/** ------------------------------------------------------------------------
+ * Minimal embedded UI (optional)
+ * ---------------------------------------------------------------------- */
 app.get("/api/chats", async (_req, res) => {
   try {
     const data = await bbGet("/api/v1/chats");
@@ -602,6 +603,7 @@ app.get("/api/messages", async (req, res) => {
   try {
     const chatGuid = req.query.chatGuid;
     if (!chatGuid) return res.status(400).json({ ok: false, error: "chatGuid required" });
+
     const data = await bbGet(`/api/v1/chat/${encodeURIComponent(chatGuid)}/messages?limit=50`);
     const messages = (data?.data ?? data ?? []).map((m) => ({
       guid: m.guid,
@@ -649,7 +651,9 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 </body></html>`);
 });
 
-/** ---------------- Start ---------------- **/
+/** ------------------------------------------------------------------------
+ * Start
+ * ---------------------------------------------------------------------- */
 app.listen(PORT, () => {
   console.log(`[bridge] listening on :${PORT}`);
   console.log(`[bridge] BB_BASE = ${BB_BASE}`);
