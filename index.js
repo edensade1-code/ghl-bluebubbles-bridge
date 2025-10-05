@@ -152,26 +152,24 @@ const upsertContactByPhone = async (locationId, accessToken, e164Phone) => {
   return cr?.data?.id || cr?.data?.contact?.id;
 };
 
-// Push inbound message into Conversations
+// Push inbound message into Conversations (mirror only if contact exists)
 const pushInboundMessage = async ({
   locationId,
   accessToken,
   contactId,
   text,
-  fromNumber,   // customer number (sender)
-  toNumber,     // your iMessage number (optional)
+  fromNumber,
+  toNumber,
 }) => {
-  // Many installs accept this shape on /conversations/messages
   const body = {
     locationId,
     contactId,
-    // channel/type metadata:
-    type: "SMS",                 // GHL treats provider channels as SMS-like
+    type: "SMS",                 // iMessage mirrored as SMS-like
     direction: "inbound",
     message: text,
     fromNumber,
     toNumber,
-    provider: "iMessage (EDEN)", // label for clarity
+    provider: "iMessage (EDEN)",
   };
 
   try {
@@ -181,20 +179,11 @@ const pushInboundMessage = async ({
     });
     return r.data;
   } catch (e) {
-    // Fallback: some accounts prefer a different field name for text
-    try {
-      const alt = { ...body, text: text };
-      const r2 = await axios.post(`${LC_API}/conversations/messages`, alt, {
-        headers: lcHeaders(accessToken),
-        timeout: 20000,
-      });
-      return r2.data;
-    } catch (e2) {
-      console.error("[inbound->GHL] failed:", e?.response?.status, e?.response?.data || e.message);
-      throw e2;
-    }
+    console.error("[inbound->GHL] failed to push message:", e?.response?.status, e?.response?.data || e.message);
+    return null;
   }
 };
+
 
 
 const newTempGuid = (prefix = "temp") =>
@@ -392,15 +381,16 @@ app.post("/bb", async (req, res) => {
   }
 });
 
-// Inbound webhook (from BlueBubbles) + GHL trigger subscription ping
+// Inbound webhook from BlueBubbles (and GHL trigger ping via Bearer)
 app.post("/webhook", async (req, res) => {
   try {
-    // 0) Allow GHL Trigger subscription pings (they include your Bearer)
+    // Allow GHL Trigger subscription pings (they include your Bearer)
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
-    // 1) Parse BlueBubbles payload (your logs show this exact shape)
+    // --- Parse BlueBubbles payload (based on your logs) ---
     const src  = req.body || {};
     const data = src.data || {};
+
     const messageText =
       data.text ??
       data.message?.text ??
@@ -428,36 +418,40 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // 2) Ignore echoes of your own outbound (optional)
+    // Ignore our own outbounds
     if (isFromMe) {
-      console.log("[bridge] /webhook: own-message (ignored)", messageText);
+      console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
       return res.status(200).json({ ok: true, ignored: "isFromMe" });
     }
 
-    // 3) Make sure we have a location & token to talk to GHL
+    if (!messageText || !fromNumber) {
+      console.log("[inbound] missing messageText/fromNumber:", { messageText, fromNumber });
+      return res.status(200).json({ ok: true });
+    }
+
+    // --- OAuth token presence ---
     const any = getAnyLocation();
     if (!any) {
-      console.error("[inbound->GHL] no OAuth tokens saved yet (install the app first)");
+      console.error("[inbound] no OAuth tokens saved (reinstall sub-account).");
       return res.status(200).json({ ok: true, note: "no-oauth" });
     }
     const { locationId, tokens } = any;
     const accessToken = getAccessTokenFor(locationId);
     if (!accessToken) {
-      console.error("[inbound->GHL] missing access_token for location", locationId);
+      console.error("[inbound] missing access_token for location", locationId);
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // 4) Normalize/validate
-    if (!messageText || !fromNumber) {
-      console.log("[inbound->GHL] missing message or fromNumber", { messageText, fromNumber });
-      return res.status(200).json({ ok: true });
+    // --- Only mirror if contact exists (no auto-create) ---
+    const e164 = ensureE164(fromNumber);
+    const contactId = await findContactIdByPhone(locationId, accessToken, e164);
+
+    if (!contactId) {
+      console.log("[inbound] contact not found in CRM; dropping (by design).", { locationId, from: e164 });
+      return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
-    // 5) Ensure a contact exists for the sender (by phone)
-    const e164 = ensureE164(fromNumber);
-    const contactId = await upsertContactByPhone(locationId, accessToken, e164);
-
-    // 6) Push the inbound into HighLevel Conversations
+    // --- Push into Conversations ---
     const pushed = await pushInboundMessage({
       locationId,
       accessToken,
@@ -467,41 +461,35 @@ app.post("/webhook", async (req, res) => {
       toNumber: toNumber || null,
     });
 
-    console.log("[inbound->GHL] delivered", {
+    console.log("[inbound] delivered → conversations:", {
       locationId,
       contactId,
       chatGuid,
-      len: messageText.length,
+      preview: messageText.slice(0, 32),
     });
 
-    // (Optional) also forward to your own webhook if configured
+    // Optional: also forward to your own webhook (if you set it)
     if (GHL_INBOUND_URL) {
-      const normalized = {
-        event: "incoming-imessage",
-        messageText,
-        from: e164,
-        to: toNumber || null,
-        chatGuid,
-        receivedAt: new Date().toISOString(),
-      };
       try {
-        await axios.post(GHL_INBOUND_URL, normalized, {
-          headers: { "Content-Type": "application/json" },
-          timeout: 10000,
-        });
+        await axios.post(GHL_INBOUND_URL, {
+          event: "incoming-imessage",
+          messageText,
+          from: e164,
+          to: toNumber || null,
+          chatGuid,
+          receivedAt: new Date().toISOString(),
+        }, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
       } catch (e) {
-        console.error("[bridge] forward to GHL_INBOUND_URL failed:", e?.message);
+        console.error("[inbound] forward to GHL_INBOUND_URL failed:", e?.message);
       }
     }
 
     return res.status(200).json({ ok: true, pushed });
   } catch (err) {
-    console.error("[bridge] /webhook error:", err?.response?.data || err.message);
-    // Always 200 so BlueBubbles doesn’t retry forever
+    console.error("[inbound] /webhook error:", err?.response?.data || err.message);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
-
 
 
 // Optional: signed marketplace webhook
