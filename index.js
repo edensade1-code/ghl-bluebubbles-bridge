@@ -301,16 +301,16 @@ const pushInboundMessage = async ({
   fromNumber,
   toNumber,
 }) => {
-  const body = {
+    const body = {
     locationId,
     contactId,
-    type: "SMS",           // GHL treats custom providers like SMS-like channels
+    type: "SMS",
     direction: "inbound",
     message: text,
     fromNumber,
-    toNumber,
     provider: "iMessage (EDEN)",
   };
+  if (toNumber) body.toNumber = toNumber; // only include if we actually have a business number
 
   try {
     const r = await axios.post(`${LC_API}/conversations/messages`, body, {
