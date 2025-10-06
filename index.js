@@ -1,7 +1,7 @@
-// index.js - VERSION 2.1 (2025-01-06)
+// index.js - VERSION 2.2 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: async startup, race conditions, error handling, memory leaks, echo prevention
-// DEPLOY THIS VERSION - has isOurOutbound function defined
+// Fixed: Token persistence via env var (survives Render restarts)
+// DEPLOY THIS VERSION - tokens now persist across restarts
 
 import express from "express";
 import cors from "cors";
