@@ -1101,7 +1101,24 @@ app.get("/debug/messages", async (req, res) => {
     res.status(500).json({ ok: false, error: e?.response?.data || e.message });
   }
 });
-
+app.get("/debug/list-providers", async (req, res) => {
+  try {
+    const any = getAnyLocation();
+    if (!any) return res.json({ error: "no tokens" });
+    
+    const { locationId } = any;
+    const accessToken = await getValidAccessToken(locationId);
+    
+    const response = await axios.get(
+      `${LC_API}/locations/${locationId}/conversation-providers`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    
+    res.json({ ok: true, providers: response.data });
+  } catch (e) {
+    res.json({ error: e.message, details: e?.response?.data });
+  }
+});
 /* -------------------------------------------------------------------------- */
 /* Start                                                                      */
 /* -------------------------------------------------------------------------- */
