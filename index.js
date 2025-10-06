@@ -1,5 +1,9 @@
 // index.js
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
+// - Outbound: GHL (Delivery URL or /send) → BlueBubbles → mirror into GHL UI (conversationProviderId pinned)
+// - Inbound:  BlueBubbles webhook (/webhook) → push into GHL UI (must use Location DID as fromNumber)
+// - OAuth:    LeadConnector tokens persisted + auto-refresh
+// - Debug:    helpful endpoints to verify contact/thread/messages
 
 import express from "express";
 import cors from "cors";
@@ -16,7 +20,7 @@ const app = express();
 /* -------------------------------------------------------------------------- */
 /* Middleware                                                                 */
 /* -------------------------------------------------------------------------- */
-// Capture raw JSON for optional signature checks
+// Capture raw body (optional HMAC checks)
 app.use(
   express.json({
     limit: "1mb",
@@ -26,35 +30,33 @@ app.use(
   })
 );
 app.use(express.urlencoded({ extended: true }));
-app.use(bodyParser.text({ type: ["text/*"] })); // friendly for quick tests
+app.use(bodyParser.text({ type: ["text/*"] }));
 
-// Helmet (allow embedding in GHL iframes)
+// Helmet — allow embedding in HighLevel iframes
 app.use(
   helmet({
     contentSecurityPolicy: {
       useDefaults: true,
       directives: {
-        // allow HighLevel to embed our app
         "frame-ancestors": [
           "'self'",
           "*.gohighlevel.com",
           "*.leadconnectorhq.com",
           "*.msgsndr.com",
-          "marketplace.gohighlevel.com"
+          "marketplace.gohighlevel.com",
         ],
-        // keep inline script for the tiny /app UI
-        "script-src": ["'self'", "'unsafe-inline'"],
+        "script-src": ["'self'", "'unsafe-inline'"], // tiny inline for /app
       },
     },
-    // IMPORTANT: disable X-Frame-Options so CSP controls framing
+    // CSP controls framing; disable frameguard header
     frameguard: false,
-    // Loosen these so the GHL preview doesn’t get blocked
+    // Loosen for the GHL preview
     crossOriginEmbedderPolicy: false,
     crossOriginOpenerPolicy: false,
   })
 );
 
-// CORS for GHL domains and local dev
+// CORS for GHL + local dev
 app.use(
   cors({
     origin: [/\.gohighlevel\.com$/, /\.leadconnectorhq\.com$/, /\.msgsndr\.com$/, /localhost/],
@@ -69,11 +71,11 @@ app.use(morgan("tiny"));
 /* -------------------------------------------------------------------------- */
 const PORT = Number(process.env.PORT || 8080);
 
-// BlueBubbles relay + password (Server Password from BB Settings → Connection)
+// BlueBubbles
 const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
 const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// Optional: forward a minimal event to a webhook (not required)
+// Optional forward (not required)
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
 // OAuth (LeadConnector)
@@ -87,39 +89,48 @@ const GHL_REDIRECT_URI = (
 const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
 const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
-// Conversation Provider shared secret (Authorization: Bearer ... or ?key=...)
+// Shared-secret: used by Delivery URL and optional trigger ping on /webhook
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
 /**
  * IMPORTANT
  * ----------
- * PARKING_NUMBER **must be a phone number that belongs to the GHL Location**.
- * (Typically the Twilio/LeadConnector SMS DID, e.g. +17867334163.)
- * GHL will reject inbound creates if `fromNumber` is not one of the Location’s numbers.
- * Do NOT set this to your iPhone’s number.
+ * PARKING_NUMBER must be a phone number that belongs to the GHL Location (Twilio/LeadConnector DID).
+ * GHL validates that `fromNumber` is owned by the Location.
+ * Do NOT set this to your iPhone number.
  */
 const ENV_PARKING_NUMBER =
   (process.env.PARKING_NUMBER || process.env.BUSINESS_NUMBER || "").trim();
 
-// Token persistence
+// Persist tokens to disk
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
+
+// Your Conversation Provider ID (from Marketplace → Your App)
+const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94718bcd02bcf453ccf46").trim();
 
 /* -------------------------------------------------------------------------- */
 /* State & Helpers                                                            */
 /* -------------------------------------------------------------------------- */
 const tokenStore = new Map(); // Map<locationId, tokens>
 
-// lightweight inbound de-dupe
+// Dedup inbound posts
 const recentInboundKeys = new Set();
 const DEDUPE_TTL_MS = 15_000;
-const dedupeKey = (o) =>
-  `${o.chatGuid || ""}|${o.from || ""}|${(o.text || "").slice(0, 128)}`;
+const dedupeKey = ({ text, from, chatGuid }) =>
+  `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
 const rememberInbound = (k) => {
   recentInboundKeys.add(k);
   setTimeout(() => recentInboundKeys.delete(k), DEDUPE_TTL_MS);
 };
 
-// tokens I/O
+// Small rolling buffer of the last pushes we made to GHL
+const LAST_INBOUND = [];
+function rememberPush(p) {
+  LAST_INBOUND.push({ at: new Date().toISOString(), ...p });
+  if (LAST_INBOUND.length > 25) LAST_INBOUND.shift();
+}
+
+// Token I/O
 async function loadTokenStore() {
   try {
     const raw = await fs.readFile(TOKENS_FILE, "utf8");
@@ -129,7 +140,9 @@ async function loadTokenStore() {
       for (const [loc, tok] of arr) tokenStore.set(loc, tok);
       console.log(`[oauth] loaded ${tokenStore.size} location token(s) from ${TOKENS_FILE}`);
     }
-  } catch { /* fresh start */ }
+  } catch {
+    // fresh start
+  }
 }
 async function saveTokenStore() {
   try {
@@ -137,22 +150,19 @@ async function saveTokenStore() {
     await fs.writeFile(TOKENS_FILE, JSON.stringify(arr, null, 2), "utf8");
     console.log(`[oauth] tokens persisted to ${TOKENS_FILE}`);
   } catch (e) {
-    console.error("[oauth] failed to persist tokens:", e?.message);
+    console.error("[oauth] persist failed:", e?.message);
   }
 }
 
-// sanity warnings
+// Sanity logs
 if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
   console.warn("[WARN] BB_GUID is not set. Set your BlueBubbles server password.");
 }
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
 }
-if (!GHL_SHARED_SECRET) {
-  console.log("[bridge] GHL_SHARED_SECRET not set (Bearer/key checks disabled).");
-}
 if (!ENV_PARKING_NUMBER) {
-  console.log("[bridge] PARKING_NUMBER/BUSINESS_NUMBER not set (inbound will be rejected by GHL).");
+  console.log("[bridge] PARKING_NUMBER/BUSINESS_NUMBER not set — GHL will reject inbound.");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -174,7 +184,7 @@ const ensureE164 = (phone) => {
   return e;
 };
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
-// Resolve our identity (parking/business) number as E.164 or null
+
 function getIdentityNumber() {
   try {
     return ENV_PARKING_NUMBER ? ensureE164(ENV_PARKING_NUMBER) : null;
@@ -183,7 +193,7 @@ function getIdentityNumber() {
   }
 }
 
-// BB REST wrappers
+// BlueBubbles wrappers
 const bbPost = async (path, body) => {
   const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
   const { data } = await axios.post(url, body, {
@@ -198,13 +208,13 @@ const bbGet = async (path) => {
   return data;
 };
 
-// shared-secret checks
+// Shared-secret checks (for Delivery URL and pinging /webhook)
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const auth = req.header("Authorization") || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
-  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true; // fallback
+  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true; // query fallback
   return false;
 };
 
@@ -215,10 +225,10 @@ const LC_API = "https://services.leadconnectorhq.com";
 const LC_VERSION = "2021-07-28";
 
 const lcHeaders = (accessToken) => ({
-  "Authorization": `Bearer ${accessToken}`,
+  Authorization: `Bearer ${accessToken}`,
   "Content-Type": "application/json",
-  "Accept": "application/json",
-  "Version": LC_VERSION,
+  Accept: "application/json",
+  Version: LC_VERSION,
 });
 
 const getAnyLocation = () => {
@@ -235,10 +245,9 @@ async function getValidAccessToken(locationId) {
   const created = Number(row._created_at_ms || 0) || Date.now();
   const ttl = Number(row.expires_in || 0) * 1000;
   const slack = 60_000;
-  const isExpired = ttl > 0 ? (Date.now() > created + ttl - slack) : false;
+  const isExpired = ttl > 0 ? Date.now() > created + ttl - slack : false;
 
   if (!isExpired) return row.access_token || null;
-
   if (!row.refresh_token) return row.access_token || null;
 
   try {
@@ -279,7 +288,7 @@ async function withLcCall(locationId, fn) {
   }
 }
 
-// Find existing contact by phone (tolerant to formats)
+// Find existing contact by phone (format tolerant)
 const findContactIdByPhone = async (locationId, e164Phone) => {
   const digits = (e164Phone || "").replace(/\D/g, "");
   const last10 = digits.slice(-10);
@@ -288,7 +297,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
     e164Phone,
     digits,
     last10,
-    `(${last10.slice(0,3)}) ${last10.slice(3,6)}-${last10.slice(6)}`,
+    `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`,
   ];
 
   const normalize = (p) => {
@@ -307,7 +316,6 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
           { headers: lcHeaders(access), timeout: 15000 }
         )
       );
-
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
       for (const c of list) {
         const candidates = new Set();
@@ -333,53 +341,50 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
-// Create a message in Conversations (we pass direction explicitly)
-// **toNumber must be CONTACT phone**
-// **fromNumber must be a LOCATION phone**
-const pushInboundMessage = async ({
+// Push a message into GHL Conversations
+// RULES:
+// - toNumber   MUST be the CONTACT's phone
+// - fromNumber MUST be a LOCATION phone (your DID)
+// - direction  MUST be "inbound" for contact→you, "outbound" for you→contact
+const pushIntoGhl = async ({
   locationId,
   accessToken,
   contactId,
   text,
-  fromNumber, // location number (Twilio/LeadConnector DID)
-  toNumber,   // contact phone
-  direction = "inbound",
-}) => {
-  const body = {
-  locationId,
-  contactId,
-  type: "SMS",
-  direction,
-  message: text,
   fromNumber,
   toNumber,
+  direction, // "inbound" | "outbound"
+}) => {
+  const body = {
+    locationId,
+    contactId,
+    type: "SMS",
+    direction,
+    message: text,
+    fromNumber,
+    toNumber,
+    conversationProviderId: CONVERSATION_PROVIDER_ID,
+    provider: "iMessage (EDEN)", // cosmetic only
+  };
 
-  // ⬇️ THIS LINE IS THE IMPORTANT ONE
-  conversationProviderId: "68d94718bcd02bcf453ccf46",
-
-  // purely cosmetic label for your own logs
-  provider: "iMessage (EDEN)",
-};
-   try {
+  try {
     const r = await axios.post(`${LC_API}/conversations/messages`, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
     const resp = r.data || {};
-    console.log("[inbound->GHL] push response:", JSON.stringify(resp));
-    // Normalize a simple success flag so our logs aren’t misleading
-    if (resp.error || resp.success === false) {
-      console.error("[inbound->GHL] API accepted request but reported error:", JSON.stringify(resp));
+    if (resp?.error || resp?.success === false) {
+      console.error("[GHL] push accepted but responded with error:", resp);
     }
     return resp;
   } catch (e) {
-    console.error("[inbound->GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
+    console.error("[GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
     return null;
   }
 };
 
 /* -------------------------------------------------------------------------- */
-/* Provider send (Delivery URL)                                               */
+/* Provider send (Delivery URL) + /send                                       */
 /* -------------------------------------------------------------------------- */
 
 function extractToAndMessage(rawBody = {}) {
@@ -431,60 +436,53 @@ const handleProviderSend = async (req, res) => {
     if (!message || !String(message).trim()) {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
-// Map BlueBubbles direction to GHL (GHL infers direction from numbers)
-let direction, fromNumber, toNumber;
-if (isFromMe) {
-  // You → contact (outbound)
-  direction  = "outbound";
-  fromNumber = identityNumber;   // your location/parking number
-  toNumber   = contactE164;      // the contact's phone
-} else {
-  // Contact → you (inbound)
-  direction  = "inbound";
-  fromNumber = contactE164;      // the contact's phone (MUST be fromNumber)
-  toNumber   = identityNumber;   // your location/parking number
-}
+
+    // Send via BlueBubbles
     const payload = {
       chatGuid: chatGuidForPhone(e164),
       tempGuid: newTempGuid("temp-bridge"),
       message: String(message),
       method: "apple-script",
     };
-
     const data = await bbPost("/api/v1/message/text", payload);
-// --- Mirror this outbound into GHL so it appears in the Inbox UI
-try {
-  // We need a location (OAuth) and the contactId for "to" so we can log the message
-  const any = getAnyLocation();
-  if (any) {
-    const { locationId } = any;
-    const identityNumber = getIdentityNumber();                   // from env
-    const contactId = await findContactIdByPhone(locationId, e164);
-    const accessToken = await getValidAccessToken(locationId);
 
-    if (identityNumber && contactId && accessToken) {
-      await pushInboundMessage({
-        locationId,
-        accessToken,
-        contactId,
-        text: String(message),
-        fromNumber: identityNumber,  // you / business identity
-        toNumber: e164,              // contact's phone
-        direction: "outbound",       // IMPORTANT
-      });
-    } else {
-      console.log("[provider->mirror] skip (identity/contact/token missing)", {
-        hasIdentity: !!identityNumber,
-        hasContact:  !!contactId,
-        hasToken:    !!accessToken,
-      });
+    // Mirror outbound to GHL (so it shows in Conversations UI)
+    try {
+      const any = getAnyLocation();
+      if (any) {
+        const { locationId } = any;
+        const identityNumber = getIdentityNumber(); // must be Location DID
+        const accessToken = await getValidAccessToken(locationId);
+        const contactId = await findContactIdByPhone(locationId, e164);
+
+        if (identityNumber && accessToken && contactId) {
+          const pushed = await pushIntoGhl({
+            locationId,
+            accessToken,
+            contactId,
+            text: String(message),
+            fromNumber: identityNumber, // you (Location DID)
+            toNumber: e164,             // contact
+            direction: "outbound",
+          });
+          if (pushed) rememberPush({
+            locationId, contactId, chatGuid: payload.chatGuid, text: message,
+            fromNumber: identityNumber, toNumber: e164, direction: "outbound"
+          });
+        } else {
+          console.log("[provider->mirror] skipped (identity/contact/token missing)", {
+            hasIdentity: !!identityNumber,
+            hasContact: !!contactId,
+            hasToken: !!accessToken,
+          });
+        }
+      } else {
+        console.log("[provider->mirror] skipped: no OAuth location");
+      }
+    } catch (e) {
+      console.error("[provider->mirror] error:", e?.response?.data || e.message);
     }
-  } else {
-    console.log("[provider->mirror] skip: no OAuth location available");
-  }
-} catch (e) {
-  console.error("[provider->mirror] failed to log outbound:", e?.response?.data || e.message);
-}
+
     return res.status(200).json({
       ok: true,
       success: true,
@@ -504,168 +502,16 @@ try {
     });
   }
 };
-// --- Simple ring buffer so we can see what we pushed into GHL
-const LAST_INBOUND = [];
-function rememberPush(p) {
-  LAST_INBOUND.push({ at: new Date().toISOString(), ...p });
-  if (LAST_INBOUND.length > 25) LAST_INBOUND.shift();
-}
-/* -------------------------------------------------------------------------- */
-/* Routes                                                                     */
-/* -------------------------------------------------------------------------- */
 
-app.get("/", (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    name: "ghl-bluebubbles-bridge",
-    relay: BB_BASE,
-    oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
-    inboundForward: !!GHL_INBOUND_URL,
-    parkingNumber: ENV_PARKING_NUMBER || null,
-    routes: [
-      "/health",
-      "/provider/deliver (GET or POST)",
-      "/send (POST)",
-      "/bb (POST passthrough)",
-      "/webhook (POST from BlueBubbles)",
-      "/debug/contact",
-      "/api/chats",
-      "/api/messages",
-      "/app",
-      "/oauth/start",
-      "/oauth/callback",
-      "/oauth/debug",
-    ],
-  });
-});
-
-app.get("/health", async (_req, res) => {
-  try {
-    const pong = await axios.get(
-      `${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`,
-      { timeout: 8000 }
-    );
-    res.status(200).json({ ok: true, relay: BB_BASE, ping: pong.data ?? null });
-  } catch (e) {
-    res.status(503).json({
-      ok: false,
-      relay: BB_BASE,
-      error: e?.response?.data ?? e?.message ?? "Ping failed",
-    });
-  }
-});
-// 1) What the bridge *thinks* it just pushed
-app.get("/debug/last-inbound", (_req, res) => {
-  res.json({ ok: true, items: LAST_INBOUND });
-});
-
-// 2) Find the contact in GHL by phone & show contactId + basic profile
-app.get("/debug/ghl/contact-by-phone", async (req, res) => {
-  try {
-    const raw = (req.query.phone || "").trim();
-    if (!raw) return res.status(400).json({ ok: false, error: "phone required (e.g. +19082655248)" });
-
-    const any = getAnyLocation();
-    if (!any) return res.status(400).json({ ok: false, error: "no-oauth" });
-    const { locationId } = any;
-    const e164 = ensureE164(raw);
-
-    const contactId = await findContactIdByPhone(locationId, e164);
-    if (!contactId) return res.json({ ok: true, found: false });
-
-    const data = await withLcCall(locationId, (token) =>
-      axios.get(`${LC_API}/contacts/${contactId}`, { headers: lcHeaders(token), timeout: 15000 })
-        .then(r => r.data)
-    );
-
-    res.json({ ok: true, found: true, locationId, contactId, contact: data });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
-  }
-});
-
-// 3) Pull the conversation for that contact and list recent messages
-app.get("/debug/ghl/thread-by-contact", async (req, res) => {
-  try {
-    const raw = (req.query.phone || "").trim();
-    if (!raw) return res.status(400).json({ ok: false, error: "phone required (e.g. +19082655248)" });
-
-    const any = getAnyLocation();
-    if (!any) return res.status(400).json({ ok: false, error: "no-oauth" });
-    const { locationId } = any;
-    const e164 = ensureE164(raw);
-
-    const contactId = await findContactIdByPhone(locationId, e164);
-    if (!contactId) return res.json({ ok: true, found: false, note: "contact not found" });
-
-    // Conversations search (LeadConnector). Returns the thread + last messages chunk.
-    const resp = await withLcCall(locationId, (token) =>
-      axios.get(
-        `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=25`,
-        { headers: lcHeaders(token), timeout: 20000 }
-      )
-    );
-
-    const payload = resp?.data || {};
-    res.json({
-      ok: true,
-      locationId,
-      contactId,
-      raw: payload,           // you’ll see conversationId(s) here
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
-  }
-});
-
-// Debug: contact lookup
-app.get("/debug/contact", async (req, res) => {
-  try {
-    const any = getAnyLocation();
-    if (!any) return res.status(200).json({ ok: false, error: "no-oauth" });
-
-    const { locationId } = any;
-    const raw = req.query.phone || "";
-    const normalized = (raw || "").replace(/\D/g, "").length === 10
-      ? `+1${(raw || "").replace(/\D/g, "")}`
-      : raw;
-
-    const id = await findContactIdByPhone(locationId, normalized);
-    res.json({ ok: true, locationId, searched: normalized, foundContactId: id });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message });
-  }
-});
-
-// Conversation Provider delivery URL (GET/POST) + typo guard
 app.all("/provider/deliver", handleProviderSend);
-app.all("/provider/deliverl", handleProviderSend); // in case it was saved with an extra "l"
+app.all("/provider/deliverl", handleProviderSend); // common typo
 app.post("/send", handleProviderSend);
-
-// Passthrough to BlueBubbles REST
-app.post("/bb", async (req, res) => {
-  try {
-    const { path, body } = req.body || {};
-    if (!path || typeof path !== "string" || !path.startsWith("/api/")) {
-      return res.status(400).json({ ok: false, error: "Provide valid 'path' starting with /api/" });
-    }
-    const data = await bbPost(path, body ?? {});
-    res.status(200).json({ ok: true, relay: BB_BASE, data });
-  } catch (err) {
-    const status = err?.response?.status ?? 500;
-    res.status(status).json({
-      ok: false,
-      relay: BB_BASE,
-      error: err?.response?.data ?? err?.message ?? "Unknown error",
-    });
-  }
-});
 
 /* ---------------------------- Inbound Webhook ----------------------------- */
 // Accepts BlueBubbles webhooks and also simple Postman payloads
 app.post("/webhook", async (req, res) => {
   try {
-    // Let trigger pings (Bearer/?key) through harmlessly
+    // Let trigger subscription pings (Bearer/?key) pass
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
     const src  = req.body || {};
@@ -679,7 +525,7 @@ app.post("/webhook", async (req, res) => {
       src.message ??
       null;
 
-    // Extract "who sent it" (the contact)
+    // Extract contact phone
     const fromRaw =
       data.handle?.address ??
       data.message?.handle?.address ??
@@ -699,44 +545,41 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // Drop our own outbound echoes (we'll mirror outbound separately if desired)
+    // Ignore our own messages (we mirror outbound ourselves)
     if (isFromMe) {
       console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
       return res.status(200).json({ ok: true, ignored: "from-me" });
     }
 
     if (!messageText || !fromRaw) {
-      console.log("[inbound] missing messageText/fromNumber:", {
-        messageText, fromNumberRaw: fromRaw
-      });
+      console.log("[inbound] missing messageText/fromNumber:", { messageText, fromRaw });
       return res.status(200).json({ ok: true });
     }
 
+    // OAuth presence
     const any = getAnyLocation();
     if (!any) {
-      console.error("[inbound] no OAuth tokens saved (install app & run /oauth/start).");
+      console.error("[inbound] no OAuth tokens saved (install app & /oauth/start).");
       return res.status(200).json({ ok: true, note: "no-oauth" });
     }
     const { locationId } = any;
 
-    // Normalize numbers
+    // Normalize contact number
     let contactE164 = null;
     try { contactE164 = ensureE164(fromRaw); } catch { contactE164 = null; }
     if (!contactE164 && chatGuid) {
-      // Fallback extract from chatGuid
       const tail = String(chatGuid).split(";").pop();
-      try { contactE164 = ensureE164(tail); } catch { /* ignore */ }
+      try { contactE164 = ensureE164(tail); } catch {}
     }
     if (!contactE164) {
-      console.log("[inbound] could not normalize contact number:", fromRaw, chatGuid);
+      console.log("[inbound] cannot normalize contact number:", fromRaw, chatGuid);
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
-    // PARKING_NUMBER must be a Location phone (Twilio DID)
-    let locationNumber = null;
-    try { locationNumber = ensureE164(ENV_PARKING_NUMBER); } catch { locationNumber = null; }
+    // Location identity number (must be DID)
+    const locationNumber = getIdentityNumber();
     if (!locationNumber) {
-      console.error("[inbound] PARKING_NUMBER/BUSINESS_NUMBER missing/invalid. Set env to Location phone (e.g., +1786…)");
+      console.error("[inbound] PARKING_NUMBER/BUSINESS_NUMBER missing/invalid. Set env to Location DID (+1…).");
       return res.status(200).json({ ok: true, note: "no-identity-number" });
     }
 
@@ -748,10 +591,10 @@ app.post("/webhook", async (req, res) => {
     }
     rememberInbound(key);
 
-    // only mirror if contact exists
+    // Contact must exist
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
-      console.log("[inbound] contact not found in CRM; dropping (by design).", { locationId, from: contactE164 });
+      console.log("[inbound] contact not found; dropping.", { locationId, from: contactE164 });
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
@@ -762,19 +605,17 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // GHL rules:
-    //   - direction: "inbound" (from contact to us)
-    //   - toNumber   = contact phone
-    //   - fromNumber = a LOCATION phone (Twilio DID on that sub-account)
+    // Map to GHL:
+    // inbound (contact → you): fromNumber = Location DID, toNumber = contact phone
     const direction = "inbound";
-    const toNumber  = contactE164;    // must match contact record
-    const fromNumber = locationNumber; // must be owned by Location
+    const fromNumber = locationNumber; // MUST be Location-owned number
+    const toNumber   = contactE164;    // MUST be contact phone
 
     console.log("[inbound] map", {
       isFromMe, contactE164, locationNumber, direction, fromNumber, toNumber, chatGuid
     });
 
-    const pushed = await pushInboundMessage({
+    const pushed = await pushIntoGhl({
       locationId,
       accessToken,
       contactId,
@@ -795,8 +636,10 @@ app.post("/webhook", async (req, res) => {
       chatGuid,
       preview: messageText.slice(0, 32),
     });
-rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, toNumber, direction });
-    // optional side-forward (diagnostic)
+
+    rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, toNumber, direction });
+
+    // Optional forward for diagnostics
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(
@@ -819,6 +662,7 @@ rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, t
     return res.status(200).json({ ok: true, pushed });
   } catch (err) {
     console.error("[inbound] /webhook error:", err?.response?.data || err.message);
+    // Always 200 so BlueBubbles doesn't retry forever
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
@@ -826,13 +670,11 @@ rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, t
 /* -------------------------------------------------------------------------- */
 /* OAuth (LeadConnector)                                                      */
 /* -------------------------------------------------------------------------- */
-
 app.get("/oauth/start", (_req, res) => {
   if (!CLIENT_ID || !GHL_REDIRECT_URI) {
     return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
   }
 
-  // message scopes + readonly contacts/locations
   const scope = [
     "conversations/message.write",
     "conversations/message.readonly",
@@ -850,7 +692,7 @@ app.get("/oauth/start", (_req, res) => {
   res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 });
 
-// Accept GET or POST; tolerate trailing slash
+// Accept GET or POST
 app.all("/oauth/callback", async (req, res) => {
   try {
     const code  = (req.query.code || req.body?.code || "").toString();
@@ -904,7 +746,7 @@ app.get("/oauth/debug", (_req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Minimal embedded UI                                                        */
+/* Minimal Embedded UI (for quick internal testing)                           */
 /* -------------------------------------------------------------------------- */
 app.get("/api/chats", async (_req, res) => {
   try {
@@ -973,9 +815,102 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 });
 
 /* -------------------------------------------------------------------------- */
-/* Start                                                                      */
+/* Debug endpoints                                                            */
 /* -------------------------------------------------------------------------- */
-// Debug: read back the last messages for a contact from LC
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    name: "ghl-bluebubbles-bridge",
+    relay: BB_BASE,
+    oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
+    inboundForward: !!GHL_INBOUND_URL,
+    parkingNumber: ENV_PARKING_NUMBER || null,
+    conversationProviderId: CONVERSATION_PROVIDER_ID,
+    routes: [
+      "/health",
+      "/provider/deliver (GET or POST)",
+      "/send (POST)",
+      "/bb (POST passthrough)",
+      "/webhook (POST from BlueBubbles)",
+      "/debug/last-inbound",
+      "/debug/ghl/contact-by-phone?phone=+1XXXXXXXXXX",
+      "/debug/ghl/thread-by-contact?phone=+1XXXXXXXXXX",
+      "/debug/messages?phone=+1XXXXXXXXXX",
+      "/app",
+      "/oauth/start",
+      "/oauth/callback",
+      "/oauth/debug",
+    ],
+  });
+});
+
+app.get("/health", async (_req, res) => {
+  try {
+    const pong = await axios.get(
+      `${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`,
+      { timeout: 8000 }
+    );
+    res.status(200).json({ ok: true, relay: BB_BASE, ping: pong.data ?? null });
+  } catch (e) {
+    res.status(503).json({ ok: false, relay: BB_BASE, error: e?.response?.data ?? e?.message ?? "Ping failed" });
+  }
+});
+
+app.get("/debug/last-inbound", (_req, res) => {
+  res.json({ ok: true, items: LAST_INBOUND });
+});
+
+app.get("/debug/ghl/contact-by-phone", async (req, res) => {
+  try {
+    const raw = (req.query.phone || "").trim();
+    if (!raw) return res.status(400).json({ ok: false, error: "phone required (e.g. +19082655248)" });
+
+    const any = getAnyLocation();
+    if (!any) return res.status(400).json({ ok: false, error: "no-oauth" });
+    const { locationId } = any;
+    const e164 = ensureE164(raw);
+
+    const contactId = await findContactIdByPhone(locationId, e164);
+    if (!contactId) return res.json({ ok: true, found: false });
+
+    const data = await withLcCall(locationId, (token) =>
+      axios.get(`${LC_API}/contacts/${contactId}`, { headers: lcHeaders(token), timeout: 15000 })
+        .then(r => r.data)
+    );
+
+    res.json({ ok: true, found: true, locationId, contactId, contact: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
+  }
+});
+
+app.get("/debug/ghl/thread-by-contact", async (req, res) => {
+  try {
+    const raw = (req.query.phone || "").trim();
+    if (!raw) return res.status(400).json({ ok: false, error: "phone required (e.g. +19082655248)" });
+
+    const any = getAnyLocation();
+    if (!any) return res.status(400).json({ ok: false, error: "no-oauth" });
+    const { locationId } = any;
+    const e164 = ensureE164(raw);
+
+    const contactId = await findContactIdByPhone(locationId, e164);
+    if (!contactId) return res.json({ ok: true, found: false, note: "contact not found" });
+
+    const resp = await withLcCall(locationId, (token) =>
+      axios.get(
+        `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=25`,
+        { headers: lcHeaders(token), timeout: 20000 }
+      )
+    );
+
+    res.json({ ok: true, locationId, contactId, raw: resp?.data || {} });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
+  }
+});
+
+// Quick GHL message fetch for a contact
 app.get("/debug/messages", async (req, res) => {
   try {
     const phoneRaw = (req.query.phone || "").trim();
@@ -985,9 +920,7 @@ app.get("/debug/messages", async (req, res) => {
     if (!any) return res.status(200).json({ ok: false, error: "no-oauth" });
     const { locationId } = any;
 
-    // normalize to E.164 and find contactId the same way inbound does
-    const phone =
-      phoneRaw.startsWith("+") ? phoneRaw : toE164US(phoneRaw);
+    const phone = phoneRaw.startsWith("+") ? phoneRaw : toE164US(phoneRaw);
     if (!phone) return res.status(400).json({ ok: false, error: "invalid phone" });
 
     const contactId = await findContactIdByPhone(locationId, phone);
@@ -1012,7 +945,9 @@ app.get("/debug/messages", async (req, res) => {
   }
 });
 
-
+/* -------------------------------------------------------------------------- */
+/* Start                                                                      */
+/* -------------------------------------------------------------------------- */
 await loadTokenStore();
 
 app.listen(PORT, () => {
@@ -1020,11 +955,12 @@ app.listen(PORT, () => {
   console.log(`[bridge] BB_BASE = ${BB_BASE}`);
   console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
   console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
+  console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
   if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
   if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
   if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
 });
 
-// persist tokens on shutdown
+// Persist tokens on shutdown
 process.on("SIGTERM", async () => { try { await saveTokenStore(); } finally { process.exit(0); } });
 process.on("SIGINT",  async () => { try { await saveTokenStore(); } finally { process.exit(0); } });
