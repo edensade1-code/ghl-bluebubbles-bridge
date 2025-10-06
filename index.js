@@ -1,7 +1,7 @@
-// index.js - VERSION 2.2 (2025-01-06)
+// index.js - VERSION 2.3 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: Token persistence via env var (survives Render restarts)
-// DEPLOY THIS VERSION - tokens now persist across restarts
+// Fixed: Token persistence via env var - now shows in OAuth callback page
+// DEPLOY THIS VERSION - base64 token shown on success page
 
 import express from "express";
 import cors from "cors";
@@ -86,6 +86,9 @@ const ENV_PARKING_NUMBER =
 
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
 
+// FIX: Persist tokens as base64 env var to survive Render restarts
+const TOKENS_ENV_KEY = "GHL_TOKENS_BASE64";
+
 const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94718bcd02bcf453ccf46").trim();
 
 /* -------------------------------------------------------------------------- */
@@ -93,18 +96,49 @@ const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94
 /* -------------------------------------------------------------------------- */
 const tokenStore = new Map();
 
-// FIX: Add cleanup to prevent memory leak
-const recentInboundKeys = new Map(); // Changed to Map to store expiry time
+// FIX: Track messages we sent to prevent echo loops
+const recentOutboundMessages = new Map(); // Track messages WE sent
+const recentInboundKeys = new Map(); // Track inbound dedupe
 const DEDUPE_TTL_MS = 15_000;
+const OUTBOUND_TTL_MS = 30_000; // Longer window for outbound
 
 const dedupeKey = ({ text, from, chatGuid }) =>
   `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
+
+// Remember messages we sent OUT (to prevent echo)
+const rememberOutbound = (text, chatGuid) => {
+  const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
+  const expiry = Date.now() + OUTBOUND_TTL_MS;
+  recentOutboundMessages.set(key, expiry);
+  
+  console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
+  
+  // Cleanup old entries
+  if (recentOutboundMessages.size > 100) {
+    const now = Date.now();
+    for (const [k, exp] of recentOutboundMessages.entries()) {
+      if (exp < now) recentOutboundMessages.delete(k);
+    }
+  }
+};
+
+// Check if this message is one we recently sent
+const isOurOutbound = (text, chatGuid) => {
+  const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
+  const expiry = recentOutboundMessages.get(key);
+  if (!expiry) return false;
+  if (expiry < Date.now()) {
+    recentOutboundMessages.delete(key);
+    return false;
+  }
+  console.log("[outbound-tracker] MATCH FOUND - this is our message");
+  return true;
+};
 
 const rememberInbound = (k) => {
   const expiry = Date.now() + DEDUPE_TTL_MS;
   recentInboundKeys.set(k, expiry);
   
-  // Cleanup expired keys periodically
   if (recentInboundKeys.size > 100) {
     const now = Date.now();
     for (const [key, exp] of recentInboundKeys.entries()) {
@@ -129,10 +163,26 @@ function rememberPush(p) {
   if (LAST_INBOUND.length > 25) LAST_INBOUND.shift();
 }
 
-// FIX: Add lock to prevent concurrent token refreshes
-const tokenRefreshLocks = new Map();
-
+// Token I/O - FIX: Try env var first, then file
 async function loadTokenStore() {
+  // Try loading from env var first (survives Render restarts)
+  const envTokens = process.env[TOKENS_ENV_KEY];
+  if (envTokens) {
+    try {
+      const decoded = Buffer.from(envTokens, 'base64').toString('utf8');
+      const arr = JSON.parse(decoded);
+      if (Array.isArray(arr)) {
+        tokenStore.clear();
+        for (const [loc, tok] of arr) tokenStore.set(loc, tok);
+        console.log(`[oauth] loaded ${tokenStore.size} token(s) from env var ${TOKENS_ENV_KEY}`);
+        return;
+      }
+    } catch (e) {
+      console.error("[oauth] failed to load from env var:", e.message);
+    }
+  }
+
+  // Fallback to file (ephemeral on Render)
   try {
     const raw = await fs.readFile(TOKENS_FILE, "utf8");
     const arr = JSON.parse(raw);
@@ -147,12 +197,24 @@ async function loadTokenStore() {
 }
 
 async function saveTokenStore() {
+  const arr = Array.from(tokenStore.entries());
+  
+  // Save to file (ephemeral)
   try {
-    const arr = Array.from(tokenStore.entries());
     await fs.writeFile(TOKENS_FILE, JSON.stringify(arr, null, 2), "utf8");
     console.log(`[oauth] tokens persisted to ${TOKENS_FILE}`);
   } catch (e) {
-    console.error("[oauth] persist failed:", e?.message);
+    console.error("[oauth] file persist failed:", e?.message);
+  }
+
+  // FIX: Also log to console so user can copy to env var
+  if (arr.length > 0) {
+    const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
+    console.log("\n=".repeat(70));
+    console.log("📋 COPY THIS TO RENDER ENV VAR TO PERSIST TOKENS:");
+    console.log(`Key:   ${TOKENS_ENV_KEY}`);
+    console.log(`Value: ${base64}`);
+    console.log("=".repeat(70) + "\n");
   }
 }
 
@@ -262,6 +324,8 @@ const getAnyLocation = () => {
 };
 
 // FIX: Prevent concurrent token refreshes with lock
+const tokenRefreshLocks = new Map();
+
 async function getValidAccessToken(locationId) {
   const row = tokenStore.get(locationId);
   if (!row) return null;
@@ -507,7 +571,10 @@ const handleProviderSend = async (req, res) => {
     
     const data = await bbPost("/api/v1/message/text", payload);
 
-    // Mirror outbound to GHL
+    // FIX: Remember this outbound message to prevent echo when webhook fires
+    rememberOutbound(String(message), payload.chatGuid);
+
+    // Mirror outbound to GHL (so it shows in Conversations UI)
     try {
       const any = getAnyLocation();
       if (any) {
@@ -807,9 +874,27 @@ app.all("/oauth/callback", async (req, res) => {
 
     console.log("[oauth] tokens saved for location:", locationId);
 
+    // FIX: Generate base64 for persistent storage
+    const arr = Array.from(tokenStore.entries());
+    const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
+
     return res
       .status(200)
-      .send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh"><div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:560px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,.3)"><h1>✅ Eden iMessage connected</h1><p>You can close this window and return to HighLevel.</p><div style="margin-top:10px;background:#16a34a;color:#fff;padding:8px 12px;border-radius:8px">Location: ${locationId}</div></div><script>setTimeout(()=>{window.close?.();},1500)</script></body></html>`);
+      .send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;padding:20px">
+<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:800px;margin:0 auto;box-shadow:0 10px 30px rgba(0,0,0,.3)">
+<h1 style="color:#10b981">✅ Eden iMessage connected</h1>
+<p>Location: <code style="background:#1f2937;padding:4px 8px;border-radius:6px">${locationId}</code></p>
+<div style="margin-top:20px;padding:16px;background:#1f2937;border-radius:8px">
+<strong style="color:#fbbf24">⚠️ IMPORTANT: Add this to Render Environment Variables</strong>
+<p style="margin:10px 0 5px;font-size:14px">This will persist your tokens across restarts:</p>
+<div style="margin:10px 0"><strong>Key:</strong> <code style="background:#0b0b0c;padding:4px 8px;border-radius:4px">GHL_TOKENS_BASE64</code></div>
+<div style="margin:10px 0"><strong>Value:</strong></div>
+<textarea readonly style="width:100%;min-height:100px;background:#0b0b0c;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;resize:vertical">${base64}</textarea>
+<button onclick="navigator.clipboard.writeText('${base64}').then(()=>alert('Copied to clipboard!'))" style="margin-top:10px;background:#10b981;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer">📋 Copy Value</button>
+</div>
+<p style="margin-top:20px;font-size:14px;color:#9ca3af">You can close this window after copying the value.</p>
+</div>
+<script>setTimeout(()=>{window.close?.();},60000)</script></body></html>`);
   } catch (e) {
     console.error("[oauth] callback error:", e?.response?.status, e?.response?.data || e.message);
     res.status(500).send("OAuth error. Check server logs for details.");
@@ -901,6 +986,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
+    version: "2.3",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
