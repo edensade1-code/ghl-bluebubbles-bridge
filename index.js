@@ -346,16 +346,15 @@ const pushInboundMessage = async ({
   direction = "inbound",
 }) => {
   const body = {
-    locationId,
-    contactId,
-    type: "SMS",
-    direction,
-    message: text,
-    fromNumber,
-    toNumber,
-    provider: "iMessage (EDEN)",
-  };
-
+  locationId,
+  contactId,
+  type: "SMS",
+  direction,
+  message: text,
+  fromNumber,
+  toNumber,
+  conversationProviderId: "68d94718bcd02bcf453ccf46"
+};
    try {
     const r = await axios.post(`${LC_API}/conversations/messages`, body, {
       headers: lcHeaders(accessToken),
