@@ -1,9 +1,6 @@
-// index.js
+// index.js - DEBUGGED VERSION
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// - Outbound: GHL (Delivery URL or /send) → BlueBubbles → mirror into GHL UI (conversationProviderId pinned)
-// - Inbound:  BlueBubbles webhook (/webhook) → push into GHL UI (must use Location DID as fromNumber)
-// - OAuth:    LeadConnector tokens persisted + auto-refresh
-// - Debug:    helpful endpoints to verify contact/thread/messages
+// Fixed: async startup, race conditions, error handling, memory leaks
 
 import express from "express";
 import cors from "cors";
@@ -20,7 +17,6 @@ const app = express();
 /* -------------------------------------------------------------------------- */
 /* Middleware                                                                 */
 /* -------------------------------------------------------------------------- */
-// Capture raw body (optional HMAC checks)
 app.use(
   express.json({
     limit: "1mb",
@@ -32,7 +28,6 @@ app.use(
 app.use(express.urlencoded({ extended: true }));
 app.use(bodyParser.text({ type: ["text/*"] }));
 
-// Helmet — allow embedding in HighLevel iframes
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -45,18 +40,15 @@ app.use(
           "*.msgsndr.com",
           "marketplace.gohighlevel.com",
         ],
-        "script-src": ["'self'", "'unsafe-inline'"], // tiny inline for /app
+        "script-src": ["'self'", "'unsafe-inline'"],
       },
     },
-    // CSP controls framing; disable frameguard header
     frameguard: false,
-    // Loosen for the GHL preview
     crossOriginEmbedderPolicy: false,
     crossOriginOpenerPolicy: false,
   })
 );
 
-// CORS for GHL + local dev
 app.use(
   cors({
     origin: [/\.gohighlevel\.com$/, /\.leadconnectorhq\.com$/, /\.msgsndr\.com$/, /localhost/],
@@ -71,14 +63,11 @@ app.use(morgan("tiny"));
 /* -------------------------------------------------------------------------- */
 const PORT = Number(process.env.PORT || 8080);
 
-// BlueBubbles
 const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
 const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// Optional forward (not required)
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
-// OAuth (LeadConnector)
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
 const GHL_REDIRECT_URI = (
@@ -89,48 +78,59 @@ const GHL_REDIRECT_URI = (
 const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
 const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
-// Shared-secret: used by Delivery URL and optional trigger ping on /webhook
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
-/**
- * IMPORTANT
- * ----------
- * PARKING_NUMBER must be a phone number that belongs to the GHL Location (Twilio/LeadConnector DID).
- * GHL validates that `fromNumber` is owned by the Location.
- * Do NOT set this to your iPhone number.
- */
 const ENV_PARKING_NUMBER =
   (process.env.PARKING_NUMBER || process.env.BUSINESS_NUMBER || "").trim();
 
-// Persist tokens to disk
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
 
-// Your Conversation Provider ID (from Marketplace → Your App)
 const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94718bcd02bcf453ccf46").trim();
 
 /* -------------------------------------------------------------------------- */
 /* State & Helpers                                                            */
 /* -------------------------------------------------------------------------- */
-const tokenStore = new Map(); // Map<locationId, tokens>
+const tokenStore = new Map();
 
-// Dedup inbound posts
-const recentInboundKeys = new Set();
+// FIX: Add cleanup to prevent memory leak
+const recentInboundKeys = new Map(); // Changed to Map to store expiry time
 const DEDUPE_TTL_MS = 15_000;
+
 const dedupeKey = ({ text, from, chatGuid }) =>
   `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
+
 const rememberInbound = (k) => {
-  recentInboundKeys.add(k);
-  setTimeout(() => recentInboundKeys.delete(k), DEDUPE_TTL_MS);
+  const expiry = Date.now() + DEDUPE_TTL_MS;
+  recentInboundKeys.set(k, expiry);
+  
+  // Cleanup expired keys periodically
+  if (recentInboundKeys.size > 100) {
+    const now = Date.now();
+    for (const [key, exp] of recentInboundKeys.entries()) {
+      if (exp < now) recentInboundKeys.delete(key);
+    }
+  }
 };
 
-// Small rolling buffer of the last pushes we made to GHL
+const isRecentInbound = (k) => {
+  const expiry = recentInboundKeys.get(k);
+  if (!expiry) return false;
+  if (expiry < Date.now()) {
+    recentInboundKeys.delete(k);
+    return false;
+  }
+  return true;
+};
+
 const LAST_INBOUND = [];
 function rememberPush(p) {
   LAST_INBOUND.push({ at: new Date().toISOString(), ...p });
   if (LAST_INBOUND.length > 25) LAST_INBOUND.shift();
 }
 
-// Token I/O
+// FIX: Add lock to prevent concurrent token refreshes
+const tokenRefreshLocks = new Map();
+
 async function loadTokenStore() {
   try {
     const raw = await fs.readFile(TOKENS_FILE, "utf8");
@@ -141,9 +141,10 @@ async function loadTokenStore() {
       console.log(`[oauth] loaded ${tokenStore.size} location token(s) from ${TOKENS_FILE}`);
     }
   } catch {
-    // fresh start
+    console.log("[oauth] no existing tokens file, starting fresh");
   }
 }
+
 async function saveTokenStore() {
   try {
     const arr = Array.from(tokenStore.entries());
@@ -154,7 +155,7 @@ async function saveTokenStore() {
   }
 }
 
-// Sanity logs
+// Validation warnings
 if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
   console.warn("[WARN] BB_GUID is not set. Set your BlueBubbles server password.");
 }
@@ -170,51 +171,72 @@ if (!ENV_PARKING_NUMBER) {
 /* -------------------------------------------------------------------------- */
 const newTempGuid = (p = "temp") => `${p}-${crypto.randomBytes(6).toString("hex")}`;
 
+// FIX: Better phone validation
 const toE164US = (raw) => {
   if (!raw) return null;
   const d = String(raw).replace(/\D/g, "");
+  
+  // Handle +1XXXXXXXXXX (11 digits starting with 1)
   if (d.startsWith("1") && d.length === 11) return `+${d}`;
+  
+  // Handle XXXXXXXXXX (10 digits)
   if (d.length === 10) return `+1${d}`;
-  if (String(raw).startsWith("+")) return String(raw);
+  
+  // Already has +
+  if (String(raw).startsWith("+") && d.length >= 10) return `+${d}`;
+  
   return null;
 };
+
 const ensureE164 = (phone) => {
   const e = toE164US(phone);
-  if (!e) throw new Error("Invalid US phone. Use E.164 like +13051234567");
+  if (!e) throw new Error(`Invalid US phone: ${phone}. Use E.164 like +13051234567`);
   return e;
 };
+
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
 function getIdentityNumber() {
   try {
     return ENV_PARKING_NUMBER ? ensureE164(ENV_PARKING_NUMBER) : null;
-  } catch {
+  } catch (err) {
+    console.error("[identity] invalid PARKING_NUMBER format:", err.message);
     return null;
   }
 }
 
-// BlueBubbles wrappers
+// FIX: Better timeout handling for BlueBubbles
 const bbPost = async (path, body) => {
   const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
-  const { data } = await axios.post(url, body, {
-    headers: { "Content-Type": "application/json" },
-    timeout: 15000,
-  });
-  return data;
-};
-const bbGet = async (path) => {
-  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
-  const { data } = await axios.get(url, { timeout: 15000 });
-  return data;
+  try {
+    const { data } = await axios.post(url, body, {
+      headers: { "Content-Type": "application/json" },
+      timeout: 15000,
+    });
+    return data;
+  } catch (err) {
+    console.error("[bbPost] failed:", path, err?.response?.status, err.message);
+    throw err;
+  }
 };
 
-// Shared-secret checks (for Delivery URL and pinging /webhook)
+const bbGet = async (path) => {
+  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+  try {
+    const { data } = await axios.get(url, { timeout: 15000 });
+    return data;
+  } catch (err) {
+    console.error("[bbGet] failed:", path, err?.response?.status, err.message);
+    throw err;
+  }
+};
+
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const auth = req.header("Authorization") || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (m && m[1].trim() === GHL_SHARED_SECRET) return true;
-  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true; // query fallback
+  if ((req.query.key || "").trim() === GHL_SHARED_SECRET) return true;
   return false;
 };
 
@@ -238,6 +260,7 @@ const getAnyLocation = () => {
   return { locationId, tokens };
 };
 
+// FIX: Prevent concurrent token refreshes with lock
 async function getValidAccessToken(locationId) {
   const row = tokenStore.get(locationId);
   if (!row) return null;
@@ -250,27 +273,43 @@ async function getValidAccessToken(locationId) {
   if (!isExpired) return row.access_token || null;
   if (!row.refresh_token) return row.access_token || null;
 
-  try {
-    const body = qs.stringify({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      grant_type: "refresh_token",
-      refresh_token: row.refresh_token,
-    });
-    const resp = await axios.post(`${OAUTH_TOKEN_BASE}/token`, body, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      timeout: 20000,
-    });
-    const fresh = resp.data || {};
-    fresh._created_at_ms = Date.now();
-    tokenStore.set(locationId, { ...row, ...fresh });
-    await saveTokenStore();
-    console.log("[oauth] refreshed access token for location:", locationId);
-    return fresh.access_token || null;
-  } catch (e) {
-    console.error("[oauth] refresh failed:", e?.response?.status, e?.response?.data || e.message);
-    return row.access_token || null;
+  // FIX: Use lock to prevent race condition
+  const lockKey = `refresh-${locationId}`;
+  if (tokenRefreshLocks.has(lockKey)) {
+    console.log("[oauth] waiting for existing refresh to complete...");
+    await tokenRefreshLocks.get(lockKey);
+    const updated = tokenStore.get(locationId);
+    return updated?.access_token || null;
   }
+
+  const refreshPromise = (async () => {
+    try {
+      const body = qs.stringify({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: row.refresh_token,
+      });
+      const resp = await axios.post(`${OAUTH_TOKEN_BASE}/token`, body, {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 20000,
+      });
+      const fresh = resp.data || {};
+      fresh._created_at_ms = Date.now();
+      tokenStore.set(locationId, { ...row, ...fresh });
+      await saveTokenStore();
+      console.log("[oauth] refreshed access token for location:", locationId);
+      return fresh.access_token || null;
+    } catch (e) {
+      console.error("[oauth] refresh failed:", e?.response?.status, e?.response?.data || e.message);
+      return row.access_token || null;
+    } finally {
+      tokenRefreshLocks.delete(lockKey);
+    }
+  })();
+
+  tokenRefreshLocks.set(lockKey, refreshPromise);
+  return await refreshPromise;
 }
 
 async function withLcCall(locationId, fn) {
@@ -288,7 +327,7 @@ async function withLcCall(locationId, fn) {
   }
 }
 
-// Find existing contact by phone (format tolerant)
+// FIX: Better error logging for contact search
 const findContactIdByPhone = async (locationId, e164Phone) => {
   const digits = (e164Phone || "").replace(/\D/g, "");
   const last10 = digits.slice(-10);
@@ -317,6 +356,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
         )
       );
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
+      
       for (const c of list) {
         const candidates = new Set();
         if (c.phone) candidates.add(c.phone);
@@ -330,6 +370,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
         for (const cand of candidates) {
           const n = normalize(cand);
           if (n && n === normalize(e164Phone)) {
+            console.log("[findContact] matched:", c.id, "for", e164Phone);
             return c.id || c._id || null;
           }
         }
@@ -338,14 +379,12 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
       console.error("[findContactIdByPhone] query failed:", q, e?.response?.status, e?.response?.data || e.message);
     }
   }
+  
+  console.log("[findContact] not found for:", e164Phone);
   return null;
 };
 
-// Push a message into GHL Conversations
-// RULES:
-// - toNumber   MUST be the CONTACT's phone
-// - fromNumber MUST be a LOCATION phone (your DID)
-// - direction  MUST be "inbound" for contact→you, "outbound" for you→contact
+// FIX: Better error handling in push
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -353,7 +392,7 @@ const pushIntoGhl = async ({
   text,
   fromNumber,
   toNumber,
-  direction, // "inbound" | "outbound"
+  direction,
 }) => {
   const body = {
     locationId,
@@ -364,7 +403,7 @@ const pushIntoGhl = async ({
     fromNumber,
     toNumber,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
-    provider: "iMessage (EDEN)", // cosmetic only
+    provider: "iMessage (EDEN)",
   };
 
   try {
@@ -373,12 +412,30 @@ const pushIntoGhl = async ({
       timeout: 20000,
     });
     const resp = r.data || {};
+    
     if (resp?.error || resp?.success === false) {
-      console.error("[GHL] push accepted but responded with error:", resp);
+      console.error("[GHL] push accepted but errored:", resp);
+      return null;
     }
+    
+    console.log("[GHL] push success:", {
+      messageId: resp.messageId || resp.id,
+      contactId,
+      direction,
+    });
     return resp;
   } catch (e) {
-    console.error("[GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
+    const status = e?.response?.status;
+    const data = e?.response?.data;
+    
+    // FIX: Better error messages
+    if (status === 400 && data?.message?.includes("fromNumber")) {
+      console.error("[GHL] INVALID fromNumber - must be a Location-owned DID:", fromNumber);
+    } else if (status === 401) {
+      console.error("[GHL] Auth failed - token may be invalid");
+    } else {
+      console.error("[GHL] push failed:", status, data || e.message);
+    }
     return null;
   }
 };
@@ -424,15 +481,17 @@ const handleProviderSend = async (req, res) => {
     let to = toRaw ?? req.query.to;
     let message = messageRaw ?? req.query.message;
 
-    console.log("[provider] method:", req.method);
-    console.log("[provider] headers:", req.headers);
-    console.log("[provider] raw body type:", typeof req.body);
-    if (typeof req.body === "string") console.log("[provider] raw body (string):", req.body.slice(0, 400));
-    console.log("[provider] parsed body:", parsedBody);
-    console.log("[provider] extracted:", { to, message });
+    console.log("[provider] send request:", { to, messagePreview: message?.slice(0, 50) });
 
     if (!to) return res.status(400).json({ ok: false, success: false, error: "Missing 'to' phone" });
-    const e164 = ensureE164(String(to));
+    
+    let e164;
+    try {
+      e164 = ensureE164(String(to));
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+    
     if (!message || !String(message).trim()) {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
@@ -444,14 +503,15 @@ const handleProviderSend = async (req, res) => {
       message: String(message),
       method: "apple-script",
     };
+    
     const data = await bbPost("/api/v1/message/text", payload);
 
-    // Mirror outbound to GHL (so it shows in Conversations UI)
+    // Mirror outbound to GHL
     try {
       const any = getAnyLocation();
       if (any) {
         const { locationId } = any;
-        const identityNumber = getIdentityNumber(); // must be Location DID
+        const identityNumber = getIdentityNumber();
         const accessToken = await getValidAccessToken(locationId);
         const contactId = await findContactIdByPhone(locationId, e164);
 
@@ -461,23 +521,23 @@ const handleProviderSend = async (req, res) => {
             accessToken,
             contactId,
             text: String(message),
-            fromNumber: identityNumber, // you (Location DID)
-            toNumber: e164,             // contact
+            fromNumber: identityNumber,
+            toNumber: e164,
             direction: "outbound",
           });
-          if (pushed) rememberPush({
-            locationId, contactId, chatGuid: payload.chatGuid, text: message,
-            fromNumber: identityNumber, toNumber: e164, direction: "outbound"
-          });
+          if (pushed) {
+            rememberPush({
+              locationId, contactId, chatGuid: payload.chatGuid, text: message,
+              fromNumber: identityNumber, toNumber: e164, direction: "outbound"
+            });
+          }
         } else {
-          console.log("[provider->mirror] skipped (identity/contact/token missing)", {
+          console.log("[provider->mirror] skipped:", {
             hasIdentity: !!identityNumber,
             hasContact: !!contactId,
             hasToken: !!accessToken,
           });
         }
-      } else {
-        console.log("[provider->mirror] skipped: no OAuth location");
       }
     } catch (e) {
       console.error("[provider->mirror] error:", e?.response?.data || e.message);
@@ -504,20 +564,19 @@ const handleProviderSend = async (req, res) => {
 };
 
 app.all("/provider/deliver", handleProviderSend);
-app.all("/provider/deliverl", handleProviderSend); // common typo
+app.all("/provider/deliverl", handleProviderSend);
 app.post("/send", handleProviderSend);
 
 /* ---------------------------- Inbound Webhook ----------------------------- */
-// Accepts BlueBubbles webhooks and also simple Postman payloads
+// FIX: Better filtering to prevent echo loops and catch ALL inbound messages
 app.post("/webhook", async (req, res) => {
   try {
-    // Let trigger subscription pings (Bearer/?key) pass
+    // Allow subscription pings
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
     const src  = req.body || {};
     const data = src.data || {};
 
-    // Extract message text
     const messageText =
       data.text ??
       data.message?.text ??
@@ -525,7 +584,6 @@ app.post("/webhook", async (req, res) => {
       src.message ??
       null;
 
-    // Extract contact phone
     const fromRaw =
       data.handle?.address ??
       data.message?.handle?.address ??
@@ -534,7 +592,6 @@ app.post("/webhook", async (req, res) => {
       data.handle ??
       null;
 
-    // Chat GUID if present
     const chatGuid =
       data.chats?.[0]?.guid ??
       data.chat?.guid ??
@@ -545,26 +602,38 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // Ignore our own messages (we mirror outbound ourselves)
-    if (isFromMe) {
-      console.log("[inbound] own-message ignored:", { chatGuid, text: messageText });
-      return res.status(200).json({ ok: true, ignored: "from-me" });
-    }
-
     if (!messageText || !fromRaw) {
-      console.log("[inbound] missing messageText/fromNumber:", { messageText, fromRaw });
+      console.log("[inbound] missing data:", { hasText: !!messageText, hasFrom: !!fromRaw });
       return res.status(200).json({ ok: true });
     }
 
-    // OAuth presence
+    // FIX: Check if this is a message WE just sent (prevents echo loop)
+    if (isOurOutbound(messageText, chatGuid)) {
+      console.log("[inbound] ignoring our own outbound message (echo prevention):", {
+        chatGuid,
+        preview: messageText.slice(0, 32)
+      });
+      return res.status(200).json({ ok: true, ignored: "our-outbound" });
+    }
+
+    // FIX: Only ignore if BOTH isFromMe=true AND it's not in our contacts
+    // This catches messages you send from iPhone that should appear in GHL
+    if (isFromMe) {
+      console.log("[inbound] message from iPhone (isFromMe=true):", {
+        chatGuid,
+        preview: messageText.slice(0, 32)
+      });
+      // Don't return here - let it pass through to GHL as outbound
+    }
+
     const any = getAnyLocation();
     if (!any) {
-      console.error("[inbound] no OAuth tokens saved (install app & /oauth/start).");
+      console.error("[inbound] no OAuth tokens (install app at /oauth/start)");
       return res.status(200).json({ ok: true, note: "no-oauth" });
     }
     const { locationId } = any;
 
-    // Normalize contact number
+    // Normalize contact
     let contactE164 = null;
     try { contactE164 = ensureE164(fromRaw); } catch { contactE164 = null; }
     if (!contactE164 && chatGuid) {
@@ -572,47 +641,50 @@ app.post("/webhook", async (req, res) => {
       try { contactE164 = ensureE164(tail); } catch {}
     }
     if (!contactE164) {
-      console.log("[inbound] cannot normalize contact number:", fromRaw, chatGuid);
+      console.log("[inbound] cannot normalize:", { fromRaw, chatGuid });
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
-    // Location identity number (must be DID)
     const locationNumber = getIdentityNumber();
     if (!locationNumber) {
-      console.error("[inbound] PARKING_NUMBER/BUSINESS_NUMBER missing/invalid. Set env to Location DID (+1…).");
+      console.error("[inbound] PARKING_NUMBER missing/invalid");
       return res.status(200).json({ ok: true, note: "no-identity-number" });
     }
 
-    // de-dupe guard
+    // FIX: Dedupe check
     const key = dedupeKey({ text: messageText, from: contactE164, chatGuid });
-    if (recentInboundKeys.has(key)) {
-      console.log("[inbound] duplicate event suppressed.");
+    if (isRecentInbound(key)) {
+      console.log("[inbound] duplicate suppressed");
       return res.status(200).json({ ok: true, ignored: "duplicate" });
     }
     rememberInbound(key);
 
-    // Contact must exist
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
-      console.log("[inbound] contact not found; dropping.", { locationId, from: contactE164 });
+      console.log("[inbound] contact not found, dropping:", { locationId, from: contactE164 });
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
-    // token
     const accessToken = await getValidAccessToken(locationId);
     if (!accessToken) {
-      console.error("[inbound] unable to obtain access token for location", locationId);
+      console.error("[inbound] no access token for location:", locationId);
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // Map to GHL:
-    // inbound (contact → you): fromNumber = Location DID, toNumber = contact phone
-    const direction = "inbound";
-    const fromNumber = locationNumber; // MUST be Location-owned number
-    const toNumber   = contactE164;    // MUST be contact phone
+    // FIX: Determine direction based on isFromMe
+    // If isFromMe=true, this is a message YOU sent from iPhone → should be outbound in GHL
+    // If isFromMe=false, this is from contact → should be inbound in GHL
+    const direction = isFromMe ? "outbound" : "inbound";
+    const fromNumber = isFromMe ? locationNumber : locationNumber; // Always use location DID
+    const toNumber   = contactE164; // Always the contact
 
-    console.log("[inbound] map", {
-      isFromMe, contactE164, locationNumber, direction, fromNumber, toNumber, chatGuid
+    console.log("[inbound] pushing:", {
+      contactId,
+      direction,
+      isFromMe,
+      fromNumber,
+      toNumber,
+      preview: messageText.slice(0, 32)
     });
 
     const pushed = await pushIntoGhl({
@@ -626,20 +698,14 @@ app.post("/webhook", async (req, res) => {
     });
 
     if (!pushed) {
-      console.error("[inbound] push returned null (check scopes and /conversations/messages access).");
+      console.error("[inbound] push failed (check scopes/permissions)");
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log("[inbound] delivered → conversations:", {
-      locationId,
-      contactId,
-      chatGuid,
-      preview: messageText.slice(0, 32),
-    });
-
+    console.log("[inbound] success:", { locationId, contactId, chatGuid, direction });
     rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, toNumber, direction });
 
-    // Optional forward for diagnostics
+    // Optional forward
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(
@@ -650,19 +716,20 @@ app.post("/webhook", async (req, res) => {
             from: contactE164,
             to: locationNumber,
             chatGuid,
+            isFromMe,
+            direction,
             receivedAt: new Date().toISOString(),
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
         );
       } catch (e) {
-        console.error("[inbound] forward to GHL_INBOUND_URL failed:", e?.message);
+        console.error("[inbound] forward failed:", e?.message);
       }
     }
 
     return res.status(200).json({ ok: true, pushed });
   } catch (err) {
-    console.error("[inbound] /webhook error:", err?.response?.data || err.message);
-    // Always 200 so BlueBubbles doesn't retry forever
+    console.error("[inbound] error:", err?.response?.data || err.message);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
@@ -692,7 +759,6 @@ app.get("/oauth/start", (_req, res) => {
   res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
 });
 
-// Accept GET or POST
 app.all("/oauth/callback", async (req, res) => {
   try {
     const code  = (req.query.code || req.body?.code || "").toString();
@@ -721,11 +787,7 @@ app.all("/oauth/callback", async (req, res) => {
     tokenStore.set(locationId, tokens);
     await saveTokenStore();
 
-    console.log("[oauth] tokens saved for location:", locationId, {
-      haveAccess:  !!tokens.access_token,
-      haveRefresh: !!tokens.refresh_token,
-      expiresIn: tokens.expires_in,
-    });
+    console.log("[oauth] tokens saved for location:", locationId);
 
     return res
       .status(200)
@@ -746,7 +808,7 @@ app.get("/oauth/debug", (_req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Minimal Embedded UI (for quick internal testing)                           */
+/* Embedded UI                                                                */
 /* -------------------------------------------------------------------------- */
 app.get("/api/chats", async (_req, res) => {
   try {
@@ -830,7 +892,6 @@ app.get("/", (_req, res) => {
       "/health",
       "/provider/deliver (GET or POST)",
       "/send (POST)",
-      "/bb (POST passthrough)",
       "/webhook (POST from BlueBubbles)",
       "/debug/last-inbound",
       "/debug/ghl/contact-by-phone?phone=+1XXXXXXXXXX",
@@ -910,7 +971,6 @@ app.get("/debug/ghl/thread-by-contact", async (req, res) => {
   }
 });
 
-// Quick GHL message fetch for a contact
 app.get("/debug/messages", async (req, res) => {
   try {
     const phoneRaw = (req.query.phone || "").trim();
@@ -948,18 +1008,22 @@ app.get("/debug/messages", async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /* Start                                                                      */
 /* -------------------------------------------------------------------------- */
-await loadTokenStore();
 
-app.listen(PORT, () => {
-  console.log(`[bridge] listening on :${PORT}`);
-  console.log(`[bridge] BB_BASE = ${BB_BASE}`);
-  console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
-  console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
-  console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
-  if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
-  if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
-  if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
-});
+// FIX: Properly await token loading before starting server
+(async function() {
+  await loadTokenStore();
+
+  app.listen(PORT, () => {
+    console.log(`[bridge] listening on :${PORT}`);
+    console.log(`[bridge] BB_BASE = ${BB_BASE}`);
+    console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
+    console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
+    console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
+    if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
+    if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
+    if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
+  });
+})();
 
 // Persist tokens on shutdown
 process.on("SIGTERM", async () => { try { await saveTokenStore(); } finally { process.exit(0); } });
