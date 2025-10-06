@@ -353,7 +353,12 @@ const pushInboundMessage = async ({
   message: text,
   fromNumber,
   toNumber,
-  conversationProviderId: "68d94718bcd02bcf453ccf46"
+
+  // ⬇️ THIS LINE IS THE IMPORTANT ONE
+  conversationProviderId: "68d94718bcd02bcf453ccf46",
+
+  // purely cosmetic label for your own logs
+  provider: "iMessage (EDEN)",
 };
    try {
     const r = await axios.post(`${LC_API}/conversations/messages`, body, {
