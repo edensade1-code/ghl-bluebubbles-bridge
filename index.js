@@ -1,7 +1,7 @@
-// index.js - VERSION 2.8 (2025-01-06)
+// index.js - VERSION 2.10 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Use correct GHL /conversations/messages/inbound endpoint
-// DEPLOY THIS VERSION - proper inbound message API
+// Fixed: Remove conversationProviderId from request body
+// DEPLOY THIS VERSION - try without provider ID
 
 import express from "express";
 import cors from "cors";
@@ -449,7 +449,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
-// FIX: Use the correct GHL inbound message endpoint
+// FIX: Try without conversationProviderId - GHL docs say it may not be required for SMS
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -459,17 +459,15 @@ const pushIntoGhl = async ({
   toNumber,
   direction,
 }) => {
-  // Use the proper inbound message endpoint
+  // Try minimal body - remove conversationProviderId
   const body = {
     type: "SMS",
     locationId,
     contactId,
     message: text,
-    conversationProviderId: CONVERSATION_PROVIDER_ID,
   };
 
   try {
-    // FIX: Use /conversations/messages/inbound instead of /conversations/messages
     const r = await axios.post(`${LC_API}/conversations/messages/inbound`, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
@@ -1101,24 +1099,7 @@ app.get("/debug/messages", async (req, res) => {
     res.status(500).json({ ok: false, error: e?.response?.data || e.message });
   }
 });
-app.get("/debug/list-providers", async (req, res) => {
-  try {
-    const any = getAnyLocation();
-    if (!any) return res.json({ error: "no tokens" });
-    
-    const { locationId } = any;
-    const accessToken = await getValidAccessToken(locationId);
-    
-    const response = await axios.get(
-      `${LC_API}/locations/${locationId}/conversation-providers`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    
-    res.json({ ok: true, providers: response.data });
-  } catch (e) {
-    res.json({ error: e.message, details: e?.response?.data });
-  }
-});
+
 /* -------------------------------------------------------------------------- */
 /* Start                                                                      */
 /* -------------------------------------------------------------------------- */
