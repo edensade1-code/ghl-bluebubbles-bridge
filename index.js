@@ -1,7 +1,7 @@
-// index.js - VERSION 2.6 (2025-01-06)
-// Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: Correct API endpoint for posting messages to conversations
-// DEPLOY THIS VERSION - messages should appear in conversation thread
+// index.js - VERSION 2.7 (2025-01-06)
+// Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
+// Fixed: Use correct GHL API endpoint and params (reverted from 2.6)
+// DEPLOY THIS VERSION - simplified message creation
 
 import express from "express";
 import cors from "cors";
@@ -485,7 +485,7 @@ const findOrCreateConversation = async (locationId, accessToken, contactId) => {
 };
 
 // FIX: Better error handling in push
-// FIX: Post to the conversation's message endpoint, not general messages
+// FIX: Revert to working endpoint, let GHL handle conversation threading
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -495,18 +495,10 @@ const pushIntoGhl = async ({
   toNumber,
   direction,
 }) => {
-  // First, ensure we have a conversation
-  const conversationId = await findOrCreateConversation(locationId, accessToken, contactId);
-  if (!conversationId) {
-    console.error("[GHL] could not find/create conversation for contact:", contactId);
-    return null;
-  }
-
-  // FIX: Post directly to the conversation's messages endpoint
-  const endpoint = `${LC_API}/conversations/${conversationId}/messages`;
-  
+  // Don't create conversation - let GHL handle it automatically
   const body = {
     type: "SMS",
+    locationId,
     contactId,
     message: text,
     direction,
@@ -514,7 +506,7 @@ const pushIntoGhl = async ({
   };
 
   try {
-    const r = await axios.post(endpoint, body, {
+    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
@@ -528,7 +520,6 @@ const pushIntoGhl = async ({
     console.log("[GHL] push success:", {
       messageId: resp.messageId || resp.id,
       contactId,
-      conversationId,
       direction,
     });
     return resp;
@@ -536,13 +527,7 @@ const pushIntoGhl = async ({
     const status = e?.response?.status;
     const data = e?.response?.data;
     
-    if (status === 400 && data?.message?.includes("fromNumber")) {
-      console.error("[GHL] INVALID fromNumber - must be a Location-owned DID:", fromNumber);
-    } else if (status === 401) {
-      console.error("[GHL] Auth failed - token may be invalid");
-    } else {
-      console.error("[GHL] push failed:", status, data || e.message);
-    }
+    console.error("[GHL] push failed:", status, data || e.message);
     return null;
   }
 };
