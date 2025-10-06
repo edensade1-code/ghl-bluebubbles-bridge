@@ -1,7 +1,7 @@
-// index.js - VERSION 2.7 (2025-01-06)
+// index.js - VERSION 2.8 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Use correct GHL API endpoint and params (reverted from 2.6)
-// DEPLOY THIS VERSION - simplified message creation
+// Fixed: Use correct GHL /conversations/messages/inbound endpoint
+// DEPLOY THIS VERSION - proper inbound message API
 
 import express from "express";
 import cors from "cors";
@@ -210,7 +210,7 @@ async function saveTokenStore() {
   // FIX: Also log to console so user can copy to env var
   if (arr.length > 0) {
     const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
-    console.log("\n=".repeat(70));
+    console.log("\n" + "=".repeat(70));
     console.log("📋 COPY THIS TO RENDER ENV VAR TO PERSIST TOKENS:");
     console.log(`Key:   ${TOKENS_ENV_KEY}`);
     console.log(`Value: ${base64}`);
@@ -449,43 +449,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
-// FIX: Find or create conversation for a contact
-const findOrCreateConversation = async (locationId, accessToken, contactId) => {
-  try {
-    // First, try to find existing conversation
-    const searchResp = await axios.get(
-      `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    
-    const conversations = searchResp?.data?.conversations || [];
-    if (conversations.length > 0) {
-      console.log("[conversation] found existing:", conversations[0].id);
-      return conversations[0].id;
-    }
-
-    // No conversation exists, create one
-    console.log("[conversation] creating new for contact:", contactId);
-    const createResp = await axios.post(
-      `${LC_API}/conversations/`,
-      {
-        locationId,
-        contactId,
-      },
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    
-    const conversationId = createResp?.data?.conversation?.id || createResp?.data?.id;
-    console.log("[conversation] created:", conversationId);
-    return conversationId;
-  } catch (e) {
-    console.error("[conversation] find/create failed:", e?.response?.status, e?.response?.data || e.message);
-    return null;
-  }
-};
-
-// FIX: Better error handling in push
-// FIX: Revert to working endpoint, let GHL handle conversation threading
+// FIX: Use the correct GHL inbound message endpoint
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -495,18 +459,18 @@ const pushIntoGhl = async ({
   toNumber,
   direction,
 }) => {
-  // Don't create conversation - let GHL handle it automatically
+  // Use the proper inbound message endpoint
   const body = {
     type: "SMS",
     locationId,
     contactId,
     message: text,
-    direction,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
   };
 
   try {
-    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
+    // FIX: Use /conversations/messages/inbound instead of /conversations/messages
+    const r = await axios.post(`${LC_API}/conversations/messages/inbound`, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
@@ -857,6 +821,8 @@ app.get("/oauth/start", (_req, res) => {
   const scope = [
     "conversations/message.write",
     "conversations/message.readonly",
+    "conversations.write",
+    "conversations.readonly",
     "contacts.readonly",
     "locations.readonly",
   ].join(" ");
@@ -1013,7 +979,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.3",
+    version: "2.8",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
