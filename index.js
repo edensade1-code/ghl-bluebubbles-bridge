@@ -431,7 +431,19 @@ const handleProviderSend = async (req, res) => {
     if (!message || !String(message).trim()) {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
-
+// Map BlueBubbles direction to GHL (GHL infers direction from numbers)
+let direction, fromNumber, toNumber;
+if (isFromMe) {
+  // You → contact (outbound)
+  direction  = "outbound";
+  fromNumber = identityNumber;   // your location/parking number
+  toNumber   = contactE164;      // the contact's phone
+} else {
+  // Contact → you (inbound)
+  direction  = "inbound";
+  fromNumber = contactE164;      // the contact's phone (MUST be fromNumber)
+  toNumber   = identityNumber;   // your location/parking number
+}
     const payload = {
       chatGuid: chatGuidForPhone(e164),
       tempGuid: newTempGuid("temp-bridge"),
