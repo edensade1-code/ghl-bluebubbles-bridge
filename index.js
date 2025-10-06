@@ -1,7 +1,7 @@
-// index.js - VERSION 2.4 (2025-01-06)
+// index.js - VERSION 2.5 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: Messages now attach to conversations properly (threading fix)
-// DEPLOY THIS VERSION - conversationId support added
+// Fixed: Direction field re-added to message API (fixes inbound/outbound display)
+// DEPLOY THIS VERSION - messages should show correct direction
 
 import express from "express";
 import cors from "cors";
@@ -485,7 +485,7 @@ const findOrCreateConversation = async (locationId, accessToken, contactId) => {
 };
 
 // FIX: Better error handling in push
-// FIX: Better error handling in push - now with conversationId
+// FIX: Better error handling in push - now with conversationId AND direction
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -507,6 +507,7 @@ const pushIntoGhl = async ({
     conversationId,
     contactId,
     message: text,
+    direction,  // FIX: Re-added to control message direction
     conversationProviderId: CONVERSATION_PROVIDER_ID,
   };
 
