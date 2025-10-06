@@ -1,7 +1,7 @@
-// index.js - VERSION 2.3 (2025-01-06)
+// index.js - VERSION 2.4 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: Token persistence via env var - now shows in OAuth callback page
-// DEPLOY THIS VERSION - base64 token shown on success page
+// Fixed: Messages now attach to conversations properly (threading fix)
+// DEPLOY THIS VERSION - conversationId support added
 
 import express from "express";
 import cors from "cors";
@@ -449,7 +449,43 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
+// FIX: Find or create conversation for a contact
+const findOrCreateConversation = async (locationId, accessToken, contactId) => {
+  try {
+    // First, try to find existing conversation
+    const searchResp = await axios.get(
+      `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    
+    const conversations = searchResp?.data?.conversations || [];
+    if (conversations.length > 0) {
+      console.log("[conversation] found existing:", conversations[0].id);
+      return conversations[0].id;
+    }
+
+    // No conversation exists, create one
+    console.log("[conversation] creating new for contact:", contactId);
+    const createResp = await axios.post(
+      `${LC_API}/conversations/`,
+      {
+        locationId,
+        contactId,
+      },
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    
+    const conversationId = createResp?.data?.conversation?.id || createResp?.data?.id;
+    console.log("[conversation] created:", conversationId);
+    return conversationId;
+  } catch (e) {
+    console.error("[conversation] find/create failed:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+};
+
 // FIX: Better error handling in push
+// FIX: Better error handling in push - now with conversationId
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -459,16 +495,19 @@ const pushIntoGhl = async ({
   toNumber,
   direction,
 }) => {
+  // First, ensure we have a conversation
+  const conversationId = await findOrCreateConversation(locationId, accessToken, contactId);
+  if (!conversationId) {
+    console.error("[GHL] could not find/create conversation for contact:", contactId);
+    return null;
+  }
+
   const body = {
-    locationId,
-    contactId,
     type: "SMS",
-    direction,
+    conversationId,
+    contactId,
     message: text,
-    fromNumber,
-    toNumber,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
-    provider: "iMessage (EDEN)",
   };
 
   try {
@@ -486,6 +525,7 @@ const pushIntoGhl = async ({
     console.log("[GHL] push success:", {
       messageId: resp.messageId || resp.id,
       contactId,
+      conversationId,
       direction,
     });
     return resp;
@@ -493,7 +533,6 @@ const pushIntoGhl = async ({
     const status = e?.response?.status;
     const data = e?.response?.data;
     
-    // FIX: Better error messages
     if (status === 400 && data?.message?.includes("fromNumber")) {
       console.error("[GHL] INVALID fromNumber - must be a Location-owned DID:", fromNumber);
     } else if (status === 401) {
