@@ -1,7 +1,7 @@
-// index.js - VERSION 2.5 (2025-01-06)
+// index.js - VERSION 2.6 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles
-// Fixed: Direction field re-added to message API (fixes inbound/outbound display)
-// DEPLOY THIS VERSION - messages should show correct direction
+// Fixed: Correct API endpoint for posting messages to conversations
+// DEPLOY THIS VERSION - messages should appear in conversation thread
 
 import express from "express";
 import cors from "cors";
@@ -485,7 +485,7 @@ const findOrCreateConversation = async (locationId, accessToken, contactId) => {
 };
 
 // FIX: Better error handling in push
-// FIX: Better error handling in push - now with conversationId AND direction
+// FIX: Post to the conversation's message endpoint, not general messages
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -502,17 +502,19 @@ const pushIntoGhl = async ({
     return null;
   }
 
+  // FIX: Post directly to the conversation's messages endpoint
+  const endpoint = `${LC_API}/conversations/${conversationId}/messages`;
+  
   const body = {
     type: "SMS",
-    conversationId,
     contactId,
     message: text,
-    direction,  // FIX: Re-added to control message direction
+    direction,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
   };
 
   try {
-    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
+    const r = await axios.post(endpoint, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
