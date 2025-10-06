@@ -348,12 +348,18 @@ const pushInboundMessage = async ({
     provider: "iMessage (EDEN)",
   };
 
-  try {
+   try {
     const r = await axios.post(`${LC_API}/conversations/messages`, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
-    return r.data;
+    const resp = r.data || {};
+    console.log("[inbound->GHL] push response:", JSON.stringify(resp));
+    // Normalize a simple success flag so our logs aren’t misleading
+    if (resp.error || resp.success === false) {
+      console.error("[inbound->GHL] API accepted request but reported error:", JSON.stringify(resp));
+    }
+    return resp;
   } catch (e) {
     console.error("[inbound->GHL] push failed:", e?.response?.status, e?.response?.data || e.message);
     return null;
@@ -845,6 +851,44 @@ sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(
 /* -------------------------------------------------------------------------- */
 /* Start                                                                      */
 /* -------------------------------------------------------------------------- */
+// Debug: read back the last messages for a contact from LC
+app.get("/debug/messages", async (req, res) => {
+  try {
+    const phoneRaw = (req.query.phone || "").trim();
+    if (!phoneRaw) return res.status(400).json({ ok: false, error: "phone query param required" });
+
+    const any = getAnyLocation();
+    if (!any) return res.status(200).json({ ok: false, error: "no-oauth" });
+    const { locationId } = any;
+
+    // normalize to E.164 and find contactId the same way inbound does
+    const phone =
+      phoneRaw.startsWith("+") ? phoneRaw : toE164US(phoneRaw);
+    if (!phone) return res.status(400).json({ ok: false, error: "invalid phone" });
+
+    const contactId = await findContactIdByPhone(locationId, phone);
+    if (!contactId) return res.status(404).json({ ok: false, error: "contact not found" });
+
+    const data = await withLcCall(locationId, (access) =>
+      axios.get(
+        `${LC_API}/conversations/messages?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=25`,
+        { headers: lcHeaders(access), timeout: 15000 }
+      )
+    );
+
+    res.json({
+      ok: true,
+      locationId,
+      contactId,
+      phone,
+      raw: data?.data || data?.items || data,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
+  }
+});
+
+
 await loadTokenStore();
 
 app.listen(PORT, () => {
