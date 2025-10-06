@@ -568,7 +568,7 @@ app.all("/provider/deliverl", handleProviderSend);
 app.post("/send", handleProviderSend);
 
 /* ---------------------------- Inbound Webhook ----------------------------- */
-// FIX: Better filtering to prevent echo loops and catch ALL inbound messages
+// FIX: Better filtering with full payload logging for diagnostics
 app.post("/webhook", async (req, res) => {
   try {
     // Allow subscription pings
@@ -576,6 +576,9 @@ app.post("/webhook", async (req, res) => {
 
     const src  = req.body || {};
     const data = src.data || {};
+
+    // DIAGNOSTIC: Log the full payload to understand what BlueBubbles sends
+    console.log("[inbound] RAW WEBHOOK PAYLOAD:", JSON.stringify(req.body, null, 2));
 
     const messageText =
       data.text ??
@@ -602,33 +605,29 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
+    // DIAGNOSTIC: Log extracted values
+    console.log("[inbound] EXTRACTED:", {
+      messageText: messageText?.slice(0, 50),
+      fromRaw,
+      chatGuid,
+      isFromMe,
+    });
+
     if (!messageText || !fromRaw) {
-      console.log("[inbound] missing data:", { hasText: !!messageText, hasFrom: !!fromRaw });
+      console.log("[inbound] missing data - ignoring");
       return res.status(200).json({ ok: true });
     }
 
     // FIX: Check if this is a message WE just sent (prevents echo loop)
+    // This should catch messages sent via /send or /provider/deliver
     if (isOurOutbound(messageText, chatGuid)) {
-      console.log("[inbound] ignoring our own outbound message (echo prevention):", {
-        chatGuid,
-        preview: messageText.slice(0, 32)
-      });
+      console.log("[inbound] IGNORING - this is our own outbound (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "our-outbound" });
-    }
-
-    // FIX: Only ignore if BOTH isFromMe=true AND it's not in our contacts
-    // This catches messages you send from iPhone that should appear in GHL
-    if (isFromMe) {
-      console.log("[inbound] message from iPhone (isFromMe=true):", {
-        chatGuid,
-        preview: messageText.slice(0, 32)
-      });
-      // Don't return here - let it pass through to GHL as outbound
     }
 
     const any = getAnyLocation();
     if (!any) {
-      console.error("[inbound] no OAuth tokens (install app at /oauth/start)");
+      console.error("[inbound] NO OAUTH TOKENS");
       return res.status(200).json({ ok: true, note: "no-oauth" });
     }
     const { locationId } = any;
@@ -641,50 +640,54 @@ app.post("/webhook", async (req, res) => {
       try { contactE164 = ensureE164(tail); } catch {}
     }
     if (!contactE164) {
-      console.log("[inbound] cannot normalize:", { fromRaw, chatGuid });
+      console.log("[inbound] CANNOT NORMALIZE PHONE:", { fromRaw, chatGuid });
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
     const locationNumber = getIdentityNumber();
     if (!locationNumber) {
-      console.error("[inbound] PARKING_NUMBER missing/invalid");
+      console.error("[inbound] PARKING_NUMBER NOT SET OR INVALID");
       return res.status(200).json({ ok: true, note: "no-identity-number" });
     }
 
-    // FIX: Dedupe check
+    // Dedupe check
     const key = dedupeKey({ text: messageText, from: contactE164, chatGuid });
     if (isRecentInbound(key)) {
-      console.log("[inbound] duplicate suppressed");
+      console.log("[inbound] DUPLICATE - already processed");
       return res.status(200).json({ ok: true, ignored: "duplicate" });
     }
     rememberInbound(key);
 
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
-      console.log("[inbound] contact not found, dropping:", { locationId, from: contactE164 });
+      console.log("[inbound] CONTACT NOT FOUND IN GHL:", { locationId, phone: contactE164 });
       return res.status(200).json({ ok: true, dropped: "no-contact" });
     }
 
     const accessToken = await getValidAccessToken(locationId);
     if (!accessToken) {
-      console.error("[inbound] no access token for location:", locationId);
+      console.error("[inbound] NO ACCESS TOKEN");
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // FIX: Determine direction based on isFromMe
-    // If isFromMe=true, this is a message YOU sent from iPhone → should be outbound in GHL
-    // If isFromMe=false, this is from contact → should be inbound in GHL
+    // FIX: Determine direction
+    // If isFromMe=true → YOU sent from iPhone → direction=outbound
+    // If isFromMe=false → CONTACT sent → direction=inbound
     const direction = isFromMe ? "outbound" : "inbound";
-    const fromNumber = isFromMe ? locationNumber : locationNumber; // Always use location DID
-    const toNumber   = contactE164; // Always the contact
+    
+    // For GHL, ALWAYS use this mapping:
+    // fromNumber = parking/location number (your business identity)
+    // toNumber = contact's phone
+    const fromNumber = locationNumber;
+    const toNumber = contactE164;
 
-    console.log("[inbound] pushing:", {
+    console.log("[inbound] ATTEMPTING PUSH TO GHL:", {
       contactId,
       direction,
       isFromMe,
       fromNumber,
       toNumber,
-      preview: messageText.slice(0, 32)
+      messagePreview: messageText.slice(0, 50)
     });
 
     const pushed = await pushIntoGhl({
@@ -698,12 +701,26 @@ app.post("/webhook", async (req, res) => {
     });
 
     if (!pushed) {
-      console.error("[inbound] push failed (check scopes/permissions)");
+      console.error("[inbound] PUSH TO GHL FAILED - check pushIntoGhl logs above");
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log("[inbound] success:", { locationId, contactId, chatGuid, direction });
-    rememberPush({ locationId, contactId, chatGuid, text: messageText, fromNumber, toNumber, direction });
+    console.log("[inbound] ✅ SUCCESS - message pushed to GHL:", {
+      locationId,
+      contactId,
+      chatGuid,
+      direction
+    });
+    
+    rememberPush({
+      locationId,
+      contactId,
+      chatGuid,
+      text: messageText,
+      fromNumber,
+      toNumber,
+      direction
+    });
 
     // Optional forward
     if (GHL_INBOUND_URL) {
@@ -729,7 +746,7 @@ app.post("/webhook", async (req, res) => {
 
     return res.status(200).json({ ok: true, pushed });
   } catch (err) {
-    console.error("[inbound] error:", err?.response?.data || err.message);
+    console.error("[inbound] EXCEPTION:", err?.response?.data || err.message, err.stack);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
 });
