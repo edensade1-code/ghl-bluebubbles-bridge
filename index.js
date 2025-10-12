@@ -1,7 +1,7 @@
-// index.js - VERSION 2.11 (2025-01-06)
+// index.js - VERSION 2.12 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Stop mirroring outbound back to GHL, handle isFromMe correctly
-// DEPLOY THIS VERSION - fix echo loop and iPhone-initiated messages
+// Fixed: Smarter echo prevention - only block messages sent via bridge
+// DEPLOY THIS VERSION - fix inbound while preventing echo
 
 import express from "express";
 import cors from "cors";
@@ -679,13 +679,15 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // FIX: Don't block isFromMe messages - those are messages YOU sent from iPhone
-    // We need to push those to GHL as outbound
-    // Only block if it's a message we sent via the bridge (already in GHL)
-    if (!isFromMe && isOurOutbound(messageText, chatGuid)) {
-      console.log("[inbound] IGNORING - this is our bridge outbound (echo prevention)");
-      return res.status(200).json({ ok: true, ignored: "our-outbound" });
+    // FIX: Check if this message was sent via the bridge (from GHL)
+    // If so, ignore it to prevent echo
+    if (isOurOutbound(messageText, chatGuid)) {
+      console.log("[inbound] IGNORING - message was sent via bridge (echo prevention)");
+      return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
+
+    // From here: message is either from contact OR from your iPhone directly
+    // We want to process BOTH cases
 
     const any = getAnyLocation();
     if (!any) {
