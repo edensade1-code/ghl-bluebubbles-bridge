@@ -3,32 +3,27 @@
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
 //
-// 🎯 WHAT'S NEW IN VERSION 2.22:
+// 🎯 WHAT'S NEW IN VERSION 2.23:
 // -------------------------------
-// ✅ iPhone-sent messages now create CONTACT NOTES with beautiful formatting
-// ✅ Each note has a header showing: "📱 Sent from iPhone at [TIME] on [DATE]"
-// ✅ Notes appear immediately after you send from your iPhone
-// ✅ Every message is a separate note (no consolidation)
-// ✅ iMessage icon (📱) makes them easily identifiable
-// ✅ Contact→You messages still use /inbound (appear in conversation thread)
+// ✅ ALL messages now appear in the conversation thread (no side notes!)
+// ✅ iPhone-sent messages have a special "👤 YOU (via iPhone)" header
+// ✅ Contact messages appear normally
+// ✅ Both directions in ONE conversation thread
+// ✅ Clear visual distinction with emoji + header
+// ✅ Clean, chronological message flow
 //
-// 📋 WHY WE USE NOTES FOR IPHONE MESSAGES:
-// ----------------------------------------
+// 📋 WHY WE USE /INBOUND FOR BOTH DIRECTIONS:
+// --------------------------------------------
 // After thorough API research, GHL does NOT have an /outbound endpoint for
 // custom SMS conversation providers. The /outbound endpoint ONLY works for
 // CALL providers. 
 //
-// Available options were:
-// 1. ❌ Use /outbound → Doesn't exist for SMS providers
-// 2. ❌ Use /inbound for both → All messages appear on LEFT side
-// 3. ✅ Use Contact Notes → Clean, separate record of your iPhone messages
-// 4. ❌ Replace default SMS provider → Major architecture change
+// Solution: Use /inbound for BOTH directions with clear visual identifiers:
+// - Contact messages: Appear normally on LEFT side
+// - iPhone messages: Appear on LEFT side with "👤 YOU (via iPhone)" header
 //
-// Contact Notes provide:
-// - Permanent record of iPhone-sent messages
-// - Beautiful formatting with timestamps
-// - No confusion in the conversation thread
-// - Easy to find and reference
+// This keeps everything in ONE conversation thread, chronologically ordered,
+// with clear visual distinction between who sent what.
 //
 // 📋 MESSAGE FLOW:
 // ----------------
@@ -506,26 +501,52 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Push Inbound Message to GHL (Contact → You messages)                      */
+/* Push ALL Messages to GHL Conversation Thread                               */
 /* -------------------------------------------------------------------------- */
 
-const pushInboundToGhl = async ({
+const pushToGhlThread = async ({
   locationId,
   accessToken,
   contactId,
   text,
   fromNumber,
+  isFromMe,
+  timestamp,
 }) => {
+  // Format message based on who sent it
+  let messageBody;
+  
+  if (isFromMe) {
+    // iPhone message - add clear header to show it's from YOU
+    const date = timestamp ? new Date(timestamp) : new Date();
+    const timeStr = date.toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit',
+      hour12: true 
+    });
+    
+    // More prominent visual separator
+    messageBody = `━━━━━━━━━━━━━━━━━━━━
+👤 YOU (sent from iPhone)
+⏰ ${timeStr}
+━━━━━━━━━━━━━━━━━━━━
+
+${text}`;
+  } else {
+    // Contact message - send as-is
+    messageBody = text;
+  }
+
   const body = {
     locationId,
     contactId,
-    message: text,
+    message: messageBody,
     type: "SMS",
   };
 
   const endpoint = `${LC_API}/conversations/messages/inbound`;
 
-  console.log("[GHL] pushing inbound to:", endpoint);
+  console.log(`[GHL] pushing to thread (${isFromMe ? 'iPhone' : 'contact'}):`, endpoint);
 
   try {
     const r = await axios.post(endpoint, body, {
@@ -535,84 +556,21 @@ const pushInboundToGhl = async ({
     const resp = r.data || {};
     
     if (resp?.error || resp?.success === false) {
-      console.error("[GHL] inbound push accepted but errored:", resp);
+      console.error("[GHL] push accepted but errored:", resp);
       return null;
     }
     
-    console.log("[GHL] inbound push success:", {
+    console.log("[GHL] push success:", {
       messageId: resp.messageId || resp.id,
       contactId,
+      isFromMe,
     });
     return resp;
   } catch (e) {
     const status = e?.response?.status;
     const data = e?.response?.data;
     
-    console.error("[GHL] inbound push failed:", status, data || e.message);
-    return null;
-  }
-};
-
-/* -------------------------------------------------------------------------- */
-/* Create Contact Note for iPhone Messages (You → Contact messages)          */
-/* -------------------------------------------------------------------------- */
-
-const createContactNote = async ({
-  locationId,
-  accessToken,
-  contactId,
-  text,
-  fromNumber,
-  timestamp,
-}) => {
-  // Format the timestamp beautifully
-  const date = timestamp ? new Date(timestamp) : new Date();
-  const timeStr = date.toLocaleTimeString('en-US', { 
-    hour: 'numeric', 
-    minute: '2-digit',
-    hour12: true 
-  });
-  const dateStr = date.toLocaleDateString('en-US', { 
-    month: 'long', 
-    day: 'numeric', 
-    year: 'numeric' 
-  });
-
-  // Create beautiful note with header
-  const noteBody = `📱 Sent from iPhone at ${timeStr} on ${dateStr} from ${fromNumber}
-
-${text}`;
-
-  const body = {
-    body: noteBody,
-  };
-
-  const endpoint = `${LC_API}/contacts/${contactId}/notes`;
-
-  console.log("[GHL] creating contact note:", { contactId, fromNumber, timeStr, dateStr });
-
-  try {
-    const r = await axios.post(endpoint, body, {
-      headers: lcHeaders(accessToken),
-      timeout: 20000,
-    });
-    const resp = r.data || {};
-    
-    if (resp?.error || resp?.success === false) {
-      console.error("[GHL] note creation accepted but errored:", resp);
-      return null;
-    }
-    
-    console.log("[GHL] note created successfully:", {
-      noteId: resp.id,
-      contactId,
-    });
-    return resp;
-  } catch (e) {
-    const status = e?.response?.status;
-    const data = e?.response?.data;
-    
-    console.error("[GHL] note creation failed:", status, data || e.message);
+    console.error("[GHL] push failed:", status, data || e.message);
     return null;
   }
 };
@@ -822,46 +780,29 @@ app.post("/webhook", async (req, res) => {
 
     let pushed;
 
+    // Push to conversation thread with appropriate formatting
     if (isFromMe) {
-      // YOU → CONTACT (sent from your iPhone)
-      // Create a beautiful contact note
-      console.log("[inbound] IPHONE MESSAGE - creating contact note");
-      
-      pushed = await createContactNote({
-        locationId,
-        accessToken,
-        contactId,
-        text: messageText,
-        fromNumber: locationNumber,
-        timestamp,
-      });
-
-      if (!pushed) {
-        console.error("[inbound] NOTE CREATION FAILED");
-        return res.status(200).json({ ok: true, note: "note-creation-failed" });
-      }
-
-      console.log("[inbound] ✅ SUCCESS - iPhone message saved as contact note");
+      console.log("[inbound] IPHONE MESSAGE - pushing to thread with header");
     } else {
-      // CONTACT → YOU
-      // Push to conversation thread (appears on LEFT side)
-      console.log("[inbound] CONTACT MESSAGE - pushing to conversation");
-      
-      pushed = await pushInboundToGhl({
-        locationId,
-        accessToken,
-        contactId,
-        text: messageText,
-        fromNumber: locationNumber,
-      });
-
-      if (!pushed) {
-        console.error("[inbound] PUSH TO GHL FAILED");
-        return res.status(200).json({ ok: true, note: "push-failed" });
-      }
-
-      console.log("[inbound] ✅ SUCCESS - contact message pushed to conversation");
+      console.log("[inbound] CONTACT MESSAGE - pushing to thread");
     }
+    
+    pushed = await pushToGhlThread({
+      locationId,
+      accessToken,
+      contactId,
+      text: messageText,
+      fromNumber: locationNumber,
+      isFromMe,
+      timestamp,
+    });
+
+    if (!pushed) {
+      console.error("[inbound] PUSH TO GHL FAILED");
+      return res.status(200).json({ ok: true, note: "push-failed" });
+    }
+
+    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed to thread`);
 
     rememberPush({
       locationId,
@@ -871,7 +812,7 @@ app.post("/webhook", async (req, res) => {
       fromNumber: locationNumber,
       toNumber: contactE164,
       isFromMe,
-      type: isFromMe ? "note" : "inbound",
+      handledAs: "conversation-thread",
     });
 
     if (GHL_INBOUND_URL) {
@@ -885,7 +826,7 @@ app.post("/webhook", async (req, res) => {
             to: locationNumber,
             chatGuid,
             isFromMe,
-            handledAs: isFromMe ? "contact-note" : "inbound-message",
+            handledAs: "conversation-thread",
             receivedAt: new Date().toISOString(),
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
@@ -917,9 +858,6 @@ app.get("/oauth/start", (_req, res) => {
     "conversations.write",
     "conversations.readonly",
     "contacts.readonly",
-    "contacts.write",
-    "contacts/notes.write",
-    "contacts/notes.readonly",
     "locations.readonly",
   ].join(" ");
 
@@ -1047,7 +985,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.22 - Notes Mode</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.23 - Thread Mode</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1076,15 +1014,15 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.22",
-    mode: "iphone-messages-as-notes",
+    version: "2.23",
+    mode: "all-messages-in-conversation-thread",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     messageFlow: {
-      "contact→you (must exist in GHL)": "/inbound endpoint (appears in conversation)",
-      "you→contact (iPhone, must exist in GHL)": "Contact Notes with 📱 header",
+      "contact→you (in GHL)": "Conversation thread (normal message)",
+      "you→contact (iPhone, in GHL)": "Conversation thread (with '👤 YOU (via iPhone)' header)",
       "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
       "ghl→contact": "/provider/deliver → BlueBubbles",
     },
@@ -1140,14 +1078,14 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.22 - iPhone Messages as Contact Notes 📱`);
+    console.log(`[bridge] VERSION 2.23 - All Messages in Conversation Thread 💬`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Conversation thread (LEFT side) [contact must exist]");
-    console.log("  • You → Contact (iPhone): Contact Notes with 📱 header [contact must exist]");
+    console.log("  • Contact → You: Thread (normal message) [must exist in GHL]");
+    console.log("  • You → Contact (iPhone): Thread with '👤 YOU (via iPhone)' header [must exist in GHL]");
     console.log("  • Non-Contact messages: IGNORED (privacy filter)");
     console.log("  • GHL → Contact: Delivered via BlueBubbles");
     console.log("");
