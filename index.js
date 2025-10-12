@@ -30,13 +30,16 @@
 // - No confusion in the conversation thread
 // - Easy to find and reference
 //
-// 📝 MESSAGE FLOW:
+// 📋 MESSAGE FLOW:
 // ----------------
-// CONTACT → YOU:
+// CONTACT → YOU (contact must exist in GHL):
 //   BlueBubbles → /webhook → /conversations/messages/inbound → LEFT side
 //
-// YOU → CONTACT (from iPhone):
+// YOU → CONTACT (from iPhone, contact must exist in GHL):
 //   BlueBubbles → /webhook → /contacts/:contactId/notes → Contact Notes tab
+//
+// NON-CONTACT → YOU or YOU → NON-CONTACT:
+//   BlueBubbles → /webhook → IGNORED (privacy filter)
 //
 // GHL → CONTACT:
 //   GHL → /provider/deliver → BlueBubbles → iMessage → (echo prevented)
@@ -802,8 +805,13 @@ app.post("/webhook", async (req, res) => {
 
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
-      console.log("[inbound] CONTACT NOT FOUND IN GHL:", { locationId, phone: contactE164 });
-      return res.status(200).json({ ok: true, dropped: "no-contact" });
+      console.log("[inbound] CONTACT NOT FOUND IN GHL - ignoring message:", { 
+        locationId, 
+        phone: contactE164,
+        isFromMe,
+        messagePreview: messageText?.slice(0, 30)
+      });
+      return res.status(200).json({ ok: true, dropped: "no-contact", reason: "privacy-filter" });
     }
 
     const accessToken = await getValidAccessToken(locationId);
@@ -910,6 +918,8 @@ app.get("/oauth/start", (_req, res) => {
     "conversations.readonly",
     "contacts.readonly",
     "contacts.write",
+    "contacts/notes.write",
+    "contacts/notes.readonly",
     "locations.readonly",
   ].join(" ");
 
@@ -1073,8 +1083,9 @@ app.get("/", (_req, res) => {
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     messageFlow: {
-      "contact→you": "/inbound endpoint (appears in conversation)",
-      "you→contact (iPhone)": "Contact Notes with 📱 header",
+      "contact→you (must exist in GHL)": "/inbound endpoint (appears in conversation)",
+      "you→contact (iPhone, must exist in GHL)": "Contact Notes with 📱 header",
+      "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
       "ghl→contact": "/provider/deliver → BlueBubbles",
     },
   });
@@ -1135,8 +1146,9 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Conversation thread (LEFT side)");
-    console.log("  • You → Contact (iPhone): Contact Notes with 📱 header");
+    console.log("  • Contact → You: Conversation thread (LEFT side) [contact must exist]");
+    console.log("  • You → Contact (iPhone): Contact Notes with 📱 header [contact must exist]");
+    console.log("  • Non-Contact messages: IGNORED (privacy filter)");
     console.log("  • GHL → Contact: Delivered via BlueBubbles");
     console.log("");
     if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
