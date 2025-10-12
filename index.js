@@ -1,7 +1,7 @@
-// index.js - VERSION 2.16 (2025-01-06)
+// index.js - VERSION 2.17 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Add conversationProviderId for /outbound endpoint
-// DEPLOY THIS VERSION - outbound endpoint fix
+// Fixed: Find conversationId for /outbound endpoint
+// DEPLOY THIS VERSION - outbound requires conversationId
 
 import express from "express";
 import cors from "cors";
@@ -449,6 +449,27 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
+// FIX: Find conversation ID for a contact
+const findConversationId = async (locationId, accessToken, contactId) => {
+  try {
+    const resp = await axios.get(
+      `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
+      { headers: lcHeaders(accessToken), timeout: 15000 }
+    );
+    
+    const conversations = resp?.data?.conversations || [];
+    if (conversations.length > 0) {
+      console.log("[conversation] found existing:", conversations[0].id);
+      return conversations[0].id;
+    }
+    
+    return null;
+  } catch (e) {
+    console.error("[conversation] search failed:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+};
+
 // FIX: Use correct endpoint based on message direction
 const pushIntoGhl = async ({
   locationId,
@@ -466,9 +487,17 @@ const pushIntoGhl = async ({
     message: text,
   };
 
-  // FIX: /outbound endpoint requires conversationProviderId, /inbound doesn't
+  // FIX: /outbound requires BOTH conversationProviderId AND conversationId
   if (direction === "outbound") {
     body.conversationProviderId = CONVERSATION_PROVIDER_ID;
+    
+    // Find the conversation for this contact
+    const conversationId = await findConversationId(locationId, accessToken, contactId);
+    if (!conversationId) {
+      console.error("[GHL] could not find conversation for contact:", contactId);
+      return null;
+    }
+    body.conversationId = conversationId;
   }
 
   // FIX: Use different endpoints:
