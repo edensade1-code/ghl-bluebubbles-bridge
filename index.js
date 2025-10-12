@@ -1,7 +1,7 @@
-// index.js - VERSION 2.12 (2025-01-06)
+// index.js - VERSION 2.13 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Smarter echo prevention - only block messages sent via bridge
-// DEPLOY THIS VERSION - fix inbound while preventing echo
+// Fixed: Use correct endpoint based on direction (inbound vs outbound)
+// DEPLOY THIS VERSION - proper message direction display
 
 import express from "express";
 import cors from "cors";
@@ -449,7 +449,7 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
   return null;
 };
 
-// FIX: Try without conversationProviderId - GHL docs say it may not be required for SMS
+// FIX: Use correct endpoint based on message direction
 const pushIntoGhl = async ({
   locationId,
   accessToken,
@@ -459,7 +459,6 @@ const pushIntoGhl = async ({
   toNumber,
   direction,
 }) => {
-  // Try minimal body - remove conversationProviderId
   const body = {
     type: "SMS",
     locationId,
@@ -467,8 +466,15 @@ const pushIntoGhl = async ({
     message: text,
   };
 
+  // FIX: Use different endpoint based on direction
+  // inbound = contact sent to you → /inbound
+  // outbound = you sent to contact → regular /messages
+  const endpoint = direction === "inbound" 
+    ? `${LC_API}/conversations/messages/inbound`
+    : `${LC_API}/conversations/messages`;
+
   try {
-    const r = await axios.post(`${LC_API}/conversations/messages/inbound`, body, {
+    const r = await axios.post(endpoint, body, {
       headers: lcHeaders(accessToken),
       timeout: 20000,
     });
@@ -483,6 +489,7 @@ const pushIntoGhl = async ({
       messageId: resp.messageId || resp.id,
       contactId,
       direction,
+      endpoint,
     });
     return resp;
   } catch (e) {
