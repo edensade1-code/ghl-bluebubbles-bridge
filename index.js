@@ -1,7 +1,7 @@
-// index.js - VERSION 2.10 (2025-01-06)
+// index.js - VERSION 2.11 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Remove conversationProviderId from request body
-// DEPLOY THIS VERSION - try without provider ID
+// Fixed: Stop mirroring outbound back to GHL, handle isFromMe correctly
+// DEPLOY THIS VERSION - fix echo loop and iPhone-initiated messages
 
 import express from "express";
 import cors from "cors";
@@ -563,7 +563,10 @@ const handleProviderSend = async (req, res) => {
     // FIX: Remember this outbound message to prevent echo when webhook fires
     rememberOutbound(String(message), payload.chatGuid);
 
-    // Mirror outbound to GHL (so it shows in Conversations UI)
+    // FIX: DO NOT mirror outbound to GHL - it creates echo loop
+    // GHL already has the message since the user sent it from GHL
+    // Commenting out the mirror logic:
+    /*
     try {
       const any = getAnyLocation();
       if (any) {
@@ -599,6 +602,7 @@ const handleProviderSend = async (req, res) => {
     } catch (e) {
       console.error("[provider->mirror] error:", e?.response?.data || e.message);
     }
+    */
 
     return res.status(200).json({
       ok: true,
@@ -675,10 +679,11 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // FIX: Check if this is a message WE just sent (prevents echo loop)
-    // This should catch messages sent via /send or /provider/deliver
-    if (isOurOutbound(messageText, chatGuid)) {
-      console.log("[inbound] IGNORING - this is our own outbound (echo prevention)");
+    // FIX: Don't block isFromMe messages - those are messages YOU sent from iPhone
+    // We need to push those to GHL as outbound
+    // Only block if it's a message we sent via the bridge (already in GHL)
+    if (!isFromMe && isOurOutbound(messageText, chatGuid)) {
+      console.log("[inbound] IGNORING - this is our bridge outbound (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "our-outbound" });
     }
 
