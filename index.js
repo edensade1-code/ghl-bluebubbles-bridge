@@ -1,7 +1,7 @@
-// index.js - VERSION 2.15 (2025-01-06)
+// index.js - VERSION 2.16 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Use /outbound endpoint for iPhone messages (already sent externally)
-// DEPLOY THIS VERSION - proper message mirroring without duplicates
+// Fixed: Add conversationProviderId for /outbound endpoint
+// DEPLOY THIS VERSION - outbound endpoint fix
 
 import express from "express";
 import cors from "cors";
@@ -465,6 +465,11 @@ const pushIntoGhl = async ({
     contactId,
     message: text,
   };
+
+  // FIX: /outbound endpoint requires conversationProviderId, /inbound doesn't
+  if (direction === "outbound") {
+    body.conversationProviderId = CONVERSATION_PROVIDER_ID;
+  }
 
   // FIX: Use different endpoints:
   // /inbound = contact sent to you (GHL receives it)
