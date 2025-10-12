@@ -1,74 +1,48 @@
-// index.js - VERSION 2.21 (2025-01-08)
+// index.js - VERSION 2.22 (2025-01-08)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
 //
-// 🎯 PURPOSE OF THIS PROJECT:
-// ---------------------------
-// This bridge connects your iPhone's iMessage (via BlueBubbles relay server) 
-// to GoHighLevel CRM, enabling:
-// 
-// 1. BIDIRECTIONAL MESSAGING:
-//    - Send messages from GHL → Contact's iMessage
-//    - Receive messages from Contact → Show in GHL
-//    - Mirror YOUR iPhone messages → Show in GHL (right side)
+// 🎯 WHAT'S NEW IN VERSION 2.22:
+// -------------------------------
+// ✅ iPhone-sent messages now create CONTACT NOTES with beautiful formatting
+// ✅ Each note has a header showing: "📱 Sent from iPhone at [TIME] on [DATE]"
+// ✅ Notes appear immediately after you send from your iPhone
+// ✅ Every message is a separate note (no consolidation)
+// ✅ iMessage icon (📱) makes them easily identifiable
+// ✅ Contact→You messages still use /inbound (appear in conversation thread)
 //
-// 2. PRIVACY FILTERING:
-//    - Only contacts that exist in GHL get synced
-//    - Random numbers are ignored (keeps personal convos private)
+// 📋 WHY WE USE NOTES FOR IPHONE MESSAGES:
+// ----------------------------------------
+// After thorough API research, GHL does NOT have an /outbound endpoint for
+// custom SMS conversation providers. The /outbound endpoint ONLY works for
+// CALL providers. 
 //
-// 3. ECHO PREVENTION:
-//    - Smart tracking prevents message loops
-//    - Outbound tracker remembers messages WE sent
-//    - Prevents duplicate messages
+// Available options were:
+// 1. ❌ Use /outbound → Doesn't exist for SMS providers
+// 2. ❌ Use /inbound for both → All messages appear on LEFT side
+// 3. ✅ Use Contact Notes → Clean, separate record of your iPhone messages
+// 4. ❌ Replace default SMS provider → Major architecture change
 //
-// 📋 WHAT WE'RE TESTING IN VERSION 2.21:
-// ---------------------------------------
-// ALL type values failed! Time to try a different field name.
+// Contact Notes provide:
+// - Permanent record of iPhone-sent messages
+// - Beautiful formatting with timestamps
+// - No confusion in the conversation thread
+// - Easy to find and reference
 //
-// ERROR HISTORY:
-// v2.17: type: "SMS" → 422 "type must be a valid enum value"
-// v2.18: (no type) → 422 "type should not be empty"
-// v2.19: type: "Call" → 400 "No call object passed in body"
-// v2.20: type: "Custom" → 422 "type must be a valid enum value"
+// 📝 MESSAGE FLOW:
+// ----------------
+// CONTACT → YOU:
+//   BlueBubbles → /webhook → /conversations/messages/inbound → LEFT side
 //
-// NEW HYPOTHESIS: Maybe /outbound uses "messageType" instead of "type"
-// In GHL webhook payloads, we see "messageType": "SMS" being used
-// Let's try that field name instead!
+// YOU → CONTACT (from iPhone):
+//   BlueBubbles → /webhook → /contacts/:contactId/notes → Contact Notes tab
 //
-// FIX ATTEMPT #4 (this version): Use messageType: "SMS" instead of type
-// - Webhook payloads use "messageType" not "type"
-// - Maybe the API expects the same field name
+// GHL → CONTACT:
+//   GHL → /provider/deliver → BlueBubbles → iMessage → (echo prevented)
 //
-// If this fails, next nuclear option:
-// - Use /inbound for BOTH directions (let GHL figure it out)
-// - Contact GHL support to ask what the correct type value is
-// - Check if conversation providers can even use /outbound endpoint
-//
-// 📝 VERSION HISTORY & WHAT WE TRIED:
-// ------------------------------------
-// v2.17: Added conversationId lookup for /outbound endpoint
-//        - Found conversation via /conversations/search
-//        - Included conversationProviderId + conversationId
-//        - FAILED: type field rejected as invalid enum
-//
-// v2.16: Attempted to use /outbound for iPhone messages
-//        - FAILED: Missing conversationId (required for /outbound)
-//
-// v2.15: Used /inbound for all messages
-//        - WORKED: Messages appeared in GHL
-//        - PROBLEM: All showed on LEFT side (wrong direction)
-//
-// v2.14: Added echo prevention with outbound tracker
-//        - WORKED: Stopped duplicate messages from GHL sends
-//
-// v2.13: Split message flow into inbound/outbound paths
-//        - Introduced isFromMe detection
-//
-// v2.1-2.12: Various OAuth, token refresh, and contact lookup fixes
-//
-// 🔧 CURRENT CONFIGURATION (copy to Render env vars):
-// ----------------------------------------------------
+// 🔧 REQUIRED ENV VARS:
+// ---------------------
 // BB_BASE=https://relay.asapcashhomebuyers.com
 // BB_GUID=[BlueBubbles server password]
 // CLIENT_ID=[GHL OAuth client ID]
@@ -76,47 +50,8 @@
 // GHL_REDIRECT_URI=https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback
 // PARKING_NUMBER=+17867334163
 // CONVERSATION_PROVIDER_ID=68d94718bcd02bcf453ccf46
-// GHL_TOKENS_BASE64=[Base64 from /oauth/start - paste here to persist tokens]
+// GHL_TOKENS_BASE64=[Base64 from /oauth/start]
 // GHL_SHARED_SECRET=1b059e90-9f0d-4c78-81b0-97cd3053aa4a
-//
-// 🌐 WEBHOOK SETUP:
-// -----------------
-// BlueBubbles webhook URL: https://ieden-bluebubbles-bridge-1.onrender.com/webhook
-// GHL Delivery URL: https://ieden-bluebubbles-bridge-1.onrender.com/provider/deliver?key=[shared_secret]
-//
-// 📊 MESSAGE FLOW ARCHITECTURE:
-// ------------------------------
-// 
-// OUTBOUND (GHL → Contact):
-// 1. User types in GHL → Calls /provider/deliver
-// 2. Bridge sends via BlueBubbles → iMessage delivered to contact
-// 3. BlueBubbles webhooks back → Bridge ignores (outbound tracker match)
-//
-// INBOUND (Contact → You):
-// 1. Contact sends iMessage → BlueBubbles receives
-// 2. BlueBubbles webhooks → Bridge /webhook endpoint
-// 3. Bridge posts to GHL /conversations/messages/inbound
-// 4. Message appears in GHL (LEFT side - from contact)
-//
-// IPHONE-INITIATED (You → Contact from your iPhone):
-// 1. You send from iPhone → BlueBubbles detects (isFromMe=true)
-// 2. BlueBubbles webhooks → Bridge /webhook endpoint
-// 3. Bridge finds conversationId via /conversations/search
-// 4. Bridge posts to GHL /conversations/messages/outbound
-// 5. Message mirrors to GHL (RIGHT side - from you)
-//
-// 🚨 CRITICAL API REQUIREMENTS:
-// ------------------------------
-// /inbound endpoint needs:
-//   - type: "SMS" (or possibly omit for provider)
-//   - locationId, contactId, message
-//   - Does NOT need conversationProviderId or conversationId
-//
-// /outbound endpoint needs:
-//   - conversationProviderId (your provider ID)
-//   - conversationId (found via /conversations/search)
-//   - locationId, contactId, message
-//   - type field: TESTING REMOVAL (was causing 422 error)
 //
 // ============================================================================
 
@@ -181,14 +116,11 @@ app.use(morgan("tiny"));
 /* -------------------------------------------------------------------------- */
 const PORT = Number(process.env.PORT || 8080);
 
-// BlueBubbles relay server (your Mac running BlueBubbles)
 const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
 const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
-// GHL inbound webhook (optional - for forwarding messages elsewhere)
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
-// OAuth credentials for GHL API
 const CLIENT_ID = (process.env.CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.CLIENT_SECRET || "").trim();
 const GHL_REDIRECT_URI = (
@@ -199,40 +131,30 @@ const GHL_REDIRECT_URI = (
 const OAUTH_AUTHORIZE_BASE = "https://marketplace.gohighlevel.com/oauth";
 const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
-// Shared secret for webhook authentication
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
-// Your business phone number (shows as "from" in GHL)
 const ENV_PARKING_NUMBER =
   (process.env.PARKING_NUMBER || process.env.BUSINESS_NUMBER || "").trim();
 
-// Token persistence (survives Render restarts when saved as base64 env var)
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
 const TOKENS_ENV_KEY = "GHL_TOKENS_BASE64";
 
-// Your conversation provider ID from GHL marketplace app
 const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94718bcd02bcf453ccf46").trim();
 
 /* -------------------------------------------------------------------------- */
 /* State & Helper Functions                                                   */
 /* -------------------------------------------------------------------------- */
 
-// OAuth token storage (Map: locationId → token object)
 const tokenStore = new Map();
 
-// Echo prevention - tracks messages WE sent to prevent loops
-// When we send via /provider/deliver, BlueBubbles webhooks back with isFromMe=true
-// We check this map to see if it's a message we just sent, and ignore it
-const recentOutboundMessages = new Map(); // chatGuid|text → expiry timestamp
-const recentInboundKeys = new Map();      // dedupe for inbound messages
-const DEDUPE_TTL_MS = 15_000;             // 15 seconds for inbound dedupe
-const OUTBOUND_TTL_MS = 30_000;           // 30 seconds for outbound tracking
+const recentOutboundMessages = new Map();
+const recentInboundKeys = new Map();
+const DEDUPE_TTL_MS = 15_000;
+const OUTBOUND_TTL_MS = 30_000;
 
-// Create a dedupe key from message details
 const dedupeKey = ({ text, from, chatGuid }) =>
   `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
 
-// Remember an outbound message we sent (to prevent echo when webhook fires)
 const rememberOutbound = (text, chatGuid) => {
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = Date.now() + OUTBOUND_TTL_MS;
@@ -240,7 +162,6 @@ const rememberOutbound = (text, chatGuid) => {
   
   console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
   
-  // Cleanup old entries to prevent memory leak
   if (recentOutboundMessages.size > 100) {
     const now = Date.now();
     for (const [k, exp] of recentOutboundMessages.entries()) {
@@ -249,7 +170,6 @@ const rememberOutbound = (text, chatGuid) => {
   }
 };
 
-// Check if this message is one we recently sent (for echo prevention)
 const isOurOutbound = (text, chatGuid) => {
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
@@ -262,7 +182,6 @@ const isOurOutbound = (text, chatGuid) => {
   return true;
 };
 
-// Remember an inbound message (for dedupe)
 const rememberInbound = (k) => {
   const expiry = Date.now() + DEDUPE_TTL_MS;
   recentInboundKeys.set(k, expiry);
@@ -275,7 +194,6 @@ const rememberInbound = (k) => {
   }
 };
 
-// Check if we've seen this inbound message recently (dedupe)
 const isRecentInbound = (k) => {
   const expiry = recentInboundKeys.get(k);
   if (!expiry) return false;
@@ -286,7 +204,6 @@ const isRecentInbound = (k) => {
   return true;
 };
 
-// Debug: Store last 25 messages pushed to GHL
 const LAST_INBOUND = [];
 function rememberPush(p) {
   LAST_INBOUND.push({ at: new Date().toISOString(), ...p });
@@ -294,11 +211,10 @@ function rememberPush(p) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Token Persistence - Load from env var (survives restarts) or file         */
+/* Token Persistence                                                          */
 /* -------------------------------------------------------------------------- */
 
 async function loadTokenStore() {
-  // Try loading from env var first (survives Render restarts)
   const envTokens = process.env[TOKENS_ENV_KEY];
   if (envTokens) {
     try {
@@ -315,7 +231,6 @@ async function loadTokenStore() {
     }
   }
 
-  // Fallback to file (ephemeral on Render)
   try {
     const raw = await fs.readFile(TOKENS_FILE, "utf8");
     const arr = JSON.parse(raw);
@@ -332,7 +247,6 @@ async function loadTokenStore() {
 async function saveTokenStore() {
   const arr = Array.from(tokenStore.entries());
   
-  // Save to file (ephemeral on Render, but useful for local dev)
   try {
     await fs.writeFile(TOKENS_FILE, JSON.stringify(arr, null, 2), "utf8");
     console.log(`[oauth] tokens persisted to ${TOKENS_FILE}`);
@@ -340,7 +254,6 @@ async function saveTokenStore() {
     console.error("[oauth] file persist failed:", e?.message);
   }
 
-  // Print base64 to console so you can copy to env var
   if (arr.length > 0) {
     const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
     console.log("\n" + "=".repeat(70));
@@ -352,7 +265,7 @@ async function saveTokenStore() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Startup Validation - Check required env vars                              */
+/* Startup Validation                                                         */
 /* -------------------------------------------------------------------------- */
 
 if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
@@ -369,37 +282,27 @@ if (!ENV_PARKING_NUMBER) {
 /* Phone Number Helpers                                                       */
 /* -------------------------------------------------------------------------- */
 
-// Generate a temporary GUID for message tracking
 const newTempGuid = (p = "temp") => `${p}-${crypto.randomBytes(6).toString("hex")}`;
 
-// Convert any phone format to E.164 (e.g., +19082655248)
 const toE164US = (raw) => {
   if (!raw) return null;
   const d = String(raw).replace(/\D/g, "");
   
-  // Handle +1XXXXXXXXXX (11 digits starting with 1)
   if (d.startsWith("1") && d.length === 11) return `+${d}`;
-  
-  // Handle XXXXXXXXXX (10 digits)
   if (d.length === 10) return `+1${d}`;
-  
-  // Already has +
   if (String(raw).startsWith("+") && d.length >= 10) return `+${d}`;
   
   return null;
 };
 
-// Ensure phone is in E.164 format or throw error
 const ensureE164 = (phone) => {
   const e = toE164US(phone);
   if (!e) throw new Error(`Invalid US phone: ${phone}. Use E.164 like +13051234567`);
   return e;
 };
 
-// Create BlueBubbles chat GUID from phone number
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
-// Get the parking/business number in E.164 format
 function getIdentityNumber() {
   try {
     return ENV_PARKING_NUMBER ? ensureE164(ENV_PARKING_NUMBER) : null;
@@ -413,7 +316,6 @@ function getIdentityNumber() {
 /* BlueBubbles API Helpers                                                    */
 /* -------------------------------------------------------------------------- */
 
-// POST to BlueBubbles API
 const bbPost = async (path, body) => {
   const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
   try {
@@ -428,7 +330,6 @@ const bbPost = async (path, body) => {
   }
 };
 
-// GET from BlueBubbles API
 const bbGet = async (path) => {
   const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
   try {
@@ -440,7 +341,6 @@ const bbGet = async (path) => {
   }
 };
 
-// Verify webhook authentication (Bearer token or ?key= query param)
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const auth = req.header("Authorization") || "";
@@ -457,7 +357,6 @@ const verifyBearer = (req) => {
 const LC_API = "https://services.leadconnectorhq.com";
 const LC_VERSION = "2021-07-28";
 
-// Create headers for GHL API requests
 const lcHeaders = (accessToken) => ({
   Authorization: `Bearer ${accessToken}`,
   "Content-Type": "application/json",
@@ -465,7 +364,6 @@ const lcHeaders = (accessToken) => ({
   Version: LC_VERSION,
 });
 
-// Get any location from token store (for quick access when location doesn't matter)
 const getAnyLocation = () => {
   const it = tokenStore.entries().next();
   if (it.done) return null;
@@ -474,25 +372,23 @@ const getAnyLocation = () => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* OAuth Token Refresh - Prevent concurrent refreshes with lock              */
+/* OAuth Token Refresh                                                        */
 /* -------------------------------------------------------------------------- */
 
-const tokenRefreshLocks = new Map(); // locationId → Promise (prevents race conditions)
+const tokenRefreshLocks = new Map();
 
 async function getValidAccessToken(locationId) {
   const row = tokenStore.get(locationId);
   if (!row) return null;
 
-  // Check if token is expired
   const created = Number(row._created_at_ms || 0) || Date.now();
   const ttl = Number(row.expires_in || 0) * 1000;
-  const slack = 60_000; // Refresh 1 min before expiry
+  const slack = 60_000;
   const isExpired = ttl > 0 ? Date.now() > created + ttl - slack : false;
 
   if (!isExpired) return row.access_token || null;
   if (!row.refresh_token) return row.access_token || null;
 
-  // Use lock to prevent multiple simultaneous refresh attempts
   const lockKey = `refresh-${locationId}`;
   if (tokenRefreshLocks.has(lockKey)) {
     console.log("[oauth] waiting for existing refresh to complete...");
@@ -501,7 +397,6 @@ async function getValidAccessToken(locationId) {
     return updated?.access_token || null;
   }
 
-  // Create refresh promise and store in lock
   const refreshPromise = (async () => {
     try {
       const body = qs.stringify({
@@ -532,7 +427,6 @@ async function getValidAccessToken(locationId) {
   return await refreshPromise;
 }
 
-// Call GHL API with automatic token refresh on 401
 async function withLcCall(locationId, fn) {
   let token = await getValidAccessToken(locationId);
   if (!token) throw new Error("no-access-token");
@@ -549,11 +443,10 @@ async function withLcCall(locationId, fn) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Contact Lookup - Find GHL contact by phone number                         */
+/* Contact Lookup                                                             */
 /* -------------------------------------------------------------------------- */
 
 const findContactIdByPhone = async (locationId, e164Phone) => {
-  // Try multiple phone formats (E.164, digits only, formatted, last 10 digits)
   const digits = (e164Phone || "").replace(/\D/g, "");
   const last10 = digits.slice(-10);
 
@@ -564,7 +457,6 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
     `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`,
   ];
 
-  // Normalize phone number for comparison
   const normalize = (p) => {
     if (!p) return null;
     const d = String(p).replace(/\D/g, "");
@@ -573,7 +465,6 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
     return d ? `+${d}` : null;
   };
 
-  // Try each query format
   for (const q of tryQueries) {
     try {
       const r = await withLcCall(locationId, (access) =>
@@ -584,7 +475,6 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
       );
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
       
-      // Check each contact for matching phone
       for (const c of list) {
         const candidates = new Set();
         if (c.phone) candidates.add(c.phone);
@@ -613,96 +503,26 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Conversation Lookup - Find existing conversation for a contact            */
+/* Push Inbound Message to GHL (Contact → You messages)                      */
 /* -------------------------------------------------------------------------- */
 
-const findConversationId = async (locationId, accessToken, contactId) => {
-  try {
-    const resp = await axios.get(
-      `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
-      { headers: lcHeaders(accessToken), timeout: 15000 }
-    );
-    
-    const conversations = resp?.data?.conversations || [];
-    if (conversations.length > 0) {
-      console.log("[conversation] found existing:", conversations[0].id);
-      return conversations[0].id;
-    }
-    
-    return null;
-  } catch (e) {
-    console.error("[conversation] search failed:", e?.response?.status, e?.response?.data || e.message);
-    return null;
-  }
-};
-
-/* -------------------------------------------------------------------------- */
-/* Push Message to GHL - Different endpoints for inbound vs outbound         */
-/* -------------------------------------------------------------------------- */
-
-const pushIntoGhl = async ({
+const pushInboundToGhl = async ({
   locationId,
   accessToken,
   contactId,
   text,
   fromNumber,
-  toNumber,
-  direction,
 }) => {
   const body = {
     locationId,
     contactId,
     message: text,
+    type: "SMS",
   };
 
-  // VERSION 2.21 CHANGE: Try "messageType" instead of "type"
-  // ALL type values failed (SMS, Call, Custom, empty)
-  // Looking at GHL webhook payloads, they use "messageType": "SMS"
-  // Maybe the API expects "messageType" field instead of "type"!
-  //
-  // REASONING: Webhooks use "messageType", so maybe the API does too
-  // This would explain why ALL our type values were rejected - wrong field name!
+  const endpoint = `${LC_API}/conversations/messages/inbound`;
 
-  if (direction === "inbound") {
-    // For messages FROM contact TO you
-    body.type = "SMS"; // This works fine for inbound
-    // conversationProviderId and conversationId NOT required for inbound
-  } else {
-    // For messages FROM you TO contact (already sent via iPhone, just mirroring)
-    body.conversationProviderId = CONVERSATION_PROVIDER_ID;
-    
-    // Find the conversation for this contact
-    const conversationId = await findConversationId(locationId, accessToken, contactId);
-    if (!conversationId) {
-      console.error("[GHL] could not find conversation for contact:", contactId);
-      return null;
-    }
-    body.conversationId = conversationId;
-    
-    // VERSION 2.21 TEST: Use messageType instead of type
-    body.messageType = "SMS";
-    
-    // What we've tried for "type" field:
-    // ✗ type: "SMS"    → 422 "type must be a valid enum value"
-    // ✗ (no type)      → 422 "type should not be empty"
-    // ✗ type: "Call"   → 400 "No call object passed in body"
-    // ✗ type: "Custom" → 422 "type must be a valid enum value"
-    // ⏳ messageType: "SMS" → Testing now!
-    //
-    // If messageType fails, we'll try:
-    // - Use /inbound for both directions
-    // - Remove conversationProviderId (maybe it conflicts)
-    // - Just give up on showing iPhone messages on right side 😅
-  }
-
-  // Choose endpoint based on direction
-  // /inbound = contact sent to you (GHL receives it, shows LEFT side)
-  // /outbound = you sent externally (already sent, just record it in GHL, shows RIGHT side)
-  const endpoint = direction === "inbound" 
-    ? `${LC_API}/conversations/messages/inbound`
-    : `${LC_API}/conversations/messages/outbound`;
-
-  console.log("[GHL] pushing to:", endpoint, "with body:", JSON.stringify(body, null, 2));
+  console.log("[GHL] pushing inbound to:", endpoint);
 
   try {
     const r = await axios.post(endpoint, body, {
@@ -712,27 +532,84 @@ const pushIntoGhl = async ({
     const resp = r.data || {};
     
     if (resp?.error || resp?.success === false) {
-      console.error("[GHL] push accepted but errored:", resp);
+      console.error("[GHL] inbound push accepted but errored:", resp);
       return null;
     }
     
-    console.log("[GHL] push success:", {
+    console.log("[GHL] inbound push success:", {
       messageId: resp.messageId || resp.id,
       contactId,
-      direction,
-      endpoint,
     });
     return resp;
   } catch (e) {
     const status = e?.response?.status;
     const data = e?.response?.data;
     
-    console.error("[GHL] push failed:", status, data || e.message, "endpoint:", 
-      direction === "inbound" ? "/inbound" : "/outbound");
+    console.error("[GHL] inbound push failed:", status, data || e.message);
+    return null;
+  }
+};
+
+/* -------------------------------------------------------------------------- */
+/* Create Contact Note for iPhone Messages (You → Contact messages)          */
+/* -------------------------------------------------------------------------- */
+
+const createContactNote = async ({
+  locationId,
+  accessToken,
+  contactId,
+  text,
+  fromNumber,
+  timestamp,
+}) => {
+  // Format the timestamp beautifully
+  const date = timestamp ? new Date(timestamp) : new Date();
+  const timeStr = date.toLocaleTimeString('en-US', { 
+    hour: 'numeric', 
+    minute: '2-digit',
+    hour12: true 
+  });
+  const dateStr = date.toLocaleDateString('en-US', { 
+    month: 'long', 
+    day: 'numeric', 
+    year: 'numeric' 
+  });
+
+  // Create beautiful note with header
+  const noteBody = `📱 Sent from iPhone at ${timeStr} on ${dateStr} from ${fromNumber}
+
+${text}`;
+
+  const body = {
+    body: noteBody,
+  };
+
+  const endpoint = `${LC_API}/contacts/${contactId}/notes`;
+
+  console.log("[GHL] creating contact note:", { contactId, fromNumber, timeStr, dateStr });
+
+  try {
+    const r = await axios.post(endpoint, body, {
+      headers: lcHeaders(accessToken),
+      timeout: 20000,
+    });
+    const resp = r.data || {};
     
-    // VERSION 2.18 DEBUG: Log the full request body if failed
-    console.error("[GHL] failed request body was:", JSON.stringify(body, null, 2));
+    if (resp?.error || resp?.success === false) {
+      console.error("[GHL] note creation accepted but errored:", resp);
+      return null;
+    }
     
+    console.log("[GHL] note created successfully:", {
+      noteId: resp.id,
+      contactId,
+    });
+    return resp;
+  } catch (e) {
+    const status = e?.response?.status;
+    const data = e?.response?.data;
+    
+    console.error("[GHL] note creation failed:", status, data || e.message);
     return null;
   }
 };
@@ -740,11 +617,6 @@ const pushIntoGhl = async ({
 /* -------------------------------------------------------------------------- */
 /* Provider Send (Delivery URL) - GHL → iMessage                             */
 /* -------------------------------------------------------------------------- */
-// This endpoint is called when a user sends a message FROM GHL
-// We need to:
-// 1. Extract phone number and message from GHL payload
-// 2. Send via BlueBubbles to iMessage
-// 3. Remember the outbound message to prevent echo when webhook fires
 
 function extractToAndMessage(rawBody = {}) {
   let body = rawBody;
@@ -775,7 +647,6 @@ function extractToAndMessage(rawBody = {}) {
 
 const handleProviderSend = async (req, res) => {
   try {
-    // Verify authentication
     if (GHL_SHARED_SECRET && !verifyBearer(req)) {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
@@ -799,7 +670,6 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
 
-    // Send via BlueBubbles
     const payload = {
       chatGuid: chatGuidForPhone(e164),
       tempGuid: newTempGuid("temp-bridge"),
@@ -809,12 +679,7 @@ const handleProviderSend = async (req, res) => {
     
     const data = await bbPost("/api/v1/message/text", payload);
 
-    // CRITICAL: Remember this outbound message to prevent echo
-    // When BlueBubbles webhooks back with this message, we'll ignore it
     rememberOutbound(String(message), payload.chatGuid);
-
-    // DO NOT mirror outbound to GHL - it creates echo loop
-    // GHL already has the message since the user sent it from GHL
 
     return res.status(200).json({
       ok: true,
@@ -837,33 +702,22 @@ const handleProviderSend = async (req, res) => {
 };
 
 app.all("/provider/deliver", handleProviderSend);
-app.all("/provider/deliverl", handleProviderSend); // typo endpoint for backwards compat
+app.all("/provider/deliverl", handleProviderSend);
 app.post("/send", handleProviderSend);
 
 /* -------------------------------------------------------------------------- */
 /* Inbound Webhook - BlueBubbles → Bridge → GHL                              */
 /* -------------------------------------------------------------------------- */
-// This endpoint receives webhooks from BlueBubbles when:
-// 1. Contact sends you an iMessage (isFromMe=false)
-// 2. You send from iPhone (isFromMe=true)
-//
-// We need to:
-// 1. Determine if message is from contact or from you
-// 2. Check if it's an echo of a message we sent via GHL
-// 3. Push to appropriate GHL endpoint (inbound or outbound)
 
 app.post("/webhook", async (req, res) => {
   try {
-    // Allow subscription pings
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
     const src  = req.body || {};
     const data = src.data || {};
 
-    // VERSION 2.18 DEBUG: Log full payload to understand structure
     console.log("[inbound] RAW WEBHOOK PAYLOAD:", JSON.stringify(req.body, null, 2));
 
-    // Extract message details from webhook payload
     const messageText =
       data.text ??
       data.message?.text ??
@@ -889,12 +743,20 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // VERSION 2.18 DEBUG: Log extracted values
+    // Get timestamp from webhook
+    const timestamp = 
+      data.dateCreated ?? 
+      data.message?.dateCreated ?? 
+      data.date ?? 
+      src.timestamp ?? 
+      Date.now();
+
     console.log("[inbound] EXTRACTED:", {
       messageText: messageText?.slice(0, 50),
       fromRaw,
       chatGuid,
       isFromMe,
+      timestamp,
     });
 
     if (!messageText || !fromRaw) {
@@ -902,14 +764,11 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // CRITICAL: Check if this message was sent via the bridge (from GHL)
-    // If so, ignore it to prevent echo loop
     if (isOurOutbound(messageText, chatGuid)) {
       console.log("[inbound] IGNORING - message was sent via bridge (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
 
-    // Get OAuth tokens
     const any = getAnyLocation();
     if (!any) {
       console.error("[inbound] NO OAUTH TOKENS");
@@ -917,7 +776,6 @@ app.post("/webhook", async (req, res) => {
     }
     const { locationId } = any;
 
-    // Normalize contact phone number
     let contactE164 = null;
     try { contactE164 = ensureE164(fromRaw); } catch { contactE164 = null; }
     if (!contactE164 && chatGuid) {
@@ -935,7 +793,6 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-identity-number" });
     }
 
-    // Dedupe check - prevent processing same message twice
     const key = dedupeKey({ text: messageText, from: contactE164, chatGuid });
     if (isRecentInbound(key)) {
       console.log("[inbound] DUPLICATE - already processed");
@@ -943,8 +800,6 @@ app.post("/webhook", async (req, res) => {
     }
     rememberInbound(key);
 
-    // PRIVACY FILTER: Only sync contacts that exist in GHL
-    // This keeps personal iPhone conversations private
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
       console.log("[inbound] CONTACT NOT FOUND IN GHL:", { locationId, phone: contactE164 });
@@ -957,56 +812,60 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // Determine direction based on isFromMe
-    // isFromMe=true → You sent from iPhone (already sent, just mirror to GHL RIGHT side)
-    // isFromMe=false → Contact sent to you (push to GHL LEFT side)
-    const direction = isFromMe ? "outbound" : "inbound";
-    const fromNumber = locationNumber;
-    const toNumber = contactE164;
+    let pushed;
 
-    console.log("[inbound] ATTEMPTING PUSH TO GHL:", {
-      contactId,
-      direction,
-      isFromMe,
-      fromNumber,
-      toNumber,
-      messagePreview: messageText.slice(0, 50)
-    });
+    if (isFromMe) {
+      // YOU → CONTACT (sent from your iPhone)
+      // Create a beautiful contact note
+      console.log("[inbound] IPHONE MESSAGE - creating contact note");
+      
+      pushed = await createContactNote({
+        locationId,
+        accessToken,
+        contactId,
+        text: messageText,
+        fromNumber: locationNumber,
+        timestamp,
+      });
 
-    // Push to appropriate GHL endpoint
-    const pushed = await pushIntoGhl({
-      locationId,
-      accessToken,
-      contactId,
-      text: messageText,
-      fromNumber,
-      toNumber,
-      direction,
-    });
+      if (!pushed) {
+        console.error("[inbound] NOTE CREATION FAILED");
+        return res.status(200).json({ ok: true, note: "note-creation-failed" });
+      }
 
-    if (!pushed) {
-      console.error("[inbound] PUSH TO GHL FAILED - check pushIntoGhl logs above");
-      return res.status(200).json({ ok: true, note: "push-failed" });
+      console.log("[inbound] ✅ SUCCESS - iPhone message saved as contact note");
+    } else {
+      // CONTACT → YOU
+      // Push to conversation thread (appears on LEFT side)
+      console.log("[inbound] CONTACT MESSAGE - pushing to conversation");
+      
+      pushed = await pushInboundToGhl({
+        locationId,
+        accessToken,
+        contactId,
+        text: messageText,
+        fromNumber: locationNumber,
+      });
+
+      if (!pushed) {
+        console.error("[inbound] PUSH TO GHL FAILED");
+        return res.status(200).json({ ok: true, note: "push-failed" });
+      }
+
+      console.log("[inbound] ✅ SUCCESS - contact message pushed to conversation");
     }
 
-    console.log("[inbound] ✅ SUCCESS - message pushed to GHL:", {
-      locationId,
-      contactId,
-      chatGuid,
-      direction
-    });
-    
     rememberPush({
       locationId,
       contactId,
       chatGuid,
       text: messageText,
-      fromNumber,
-      toNumber,
-      direction
+      fromNumber: locationNumber,
+      toNumber: contactE164,
+      isFromMe,
+      type: isFromMe ? "note" : "inbound",
     });
 
-    // Optional: Forward to another webhook (if configured)
     if (GHL_INBOUND_URL) {
       try {
         await axios.post(
@@ -1018,7 +877,7 @@ app.post("/webhook", async (req, res) => {
             to: locationNumber,
             chatGuid,
             isFromMe,
-            direction,
+            handledAs: isFromMe ? "contact-note" : "inbound-message",
             receivedAt: new Date().toISOString(),
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
@@ -1036,7 +895,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* OAuth Flow - Connect to GHL                                                */
+/* OAuth Flow                                                                 */
 /* -------------------------------------------------------------------------- */
 
 app.get("/oauth/start", (_req, res) => {
@@ -1050,6 +909,7 @@ app.get("/oauth/start", (_req, res) => {
     "conversations.write",
     "conversations.readonly",
     "contacts.readonly",
+    "contacts.write",
     "locations.readonly",
   ].join(" ");
 
@@ -1093,7 +953,6 @@ app.all("/oauth/callback", async (req, res) => {
 
     console.log("[oauth] tokens saved for location:", locationId);
 
-    // Generate base64 for persistent storage (survives Render restarts)
     const arr = Array.from(tokenStore.entries());
     const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
 
@@ -1178,7 +1037,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">Relay: ${BB_BASE}</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.22 - Notes Mode</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1207,26 +1066,17 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.21",
+    version: "2.22",
+    mode: "iphone-messages-as-notes",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
-    inboundForward: !!GHL_INBOUND_URL,
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
-    routes: [
-      "/health",
-      "/provider/deliver (GET or POST)",
-      "/send (POST)",
-      "/webhook (POST from BlueBubbles)",
-      "/debug/last-inbound",
-      "/debug/ghl/contact-by-phone?phone=+1XXXXXXXXXX",
-      "/debug/ghl/thread-by-contact?phone=+1XXXXXXXXXX",
-      "/debug/messages?phone=+1XXXXXXXXXX",
-      "/app",
-      "/oauth/start",
-      "/oauth/callback",
-      "/oauth/debug",
-    ],
+    messageFlow: {
+      "contact→you": "/inbound endpoint (appears in conversation)",
+      "you→contact (iPhone)": "Contact Notes with 📱 header",
+      "ghl→contact": "/provider/deliver → BlueBubbles",
+    },
   });
 });
 
@@ -1270,66 +1120,6 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
   }
 });
 
-app.get("/debug/ghl/thread-by-contact", async (req, res) => {
-  try {
-    const raw = (req.query.phone || "").trim();
-    if (!raw) return res.status(400).json({ ok: false, error: "phone required (e.g. +19082655248)" });
-
-    const any = getAnyLocation();
-    if (!any) return res.status(400).json({ ok: false, error: "no-oauth" });
-    const { locationId } = any;
-    const e164 = ensureE164(raw);
-
-    const contactId = await findContactIdByPhone(locationId, e164);
-    if (!contactId) return res.json({ ok: true, found: false, note: "contact not found" });
-
-    const resp = await withLcCall(locationId, (token) =>
-      axios.get(
-        `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=25`,
-        { headers: lcHeaders(token), timeout: 20000 }
-      )
-    );
-
-    res.json({ ok: true, locationId, contactId, raw: resp?.data || {} });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
-  }
-});
-
-app.get("/debug/messages", async (req, res) => {
-  try {
-    const phoneRaw = (req.query.phone || "").trim();
-    if (!phoneRaw) return res.status(400).json({ ok: false, error: "phone query param required" });
-
-    const any = getAnyLocation();
-    if (!any) return res.status(200).json({ ok: false, error: "no-oauth" });
-    const { locationId } = any;
-
-    const phone = phoneRaw.startsWith("+") ? phoneRaw : toE164US(phoneRaw);
-    if (!phone) return res.status(400).json({ ok: false, error: "invalid phone" });
-
-    const contactId = await findContactIdByPhone(locationId, phone);
-    if (!contactId) return res.status(404).json({ ok: false, error: "contact not found" });
-
-    const data = await withLcCall(locationId, (access) =>
-      axios.get(
-        `${LC_API}/conversations/messages?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}&limit=25`,
-        { headers: lcHeaders(access), timeout: 15000 }
-      )
-    );
-
-    res.json({
-      ok: true,
-      locationId,
-      contactId,
-      phone,
-      raw: data?.data || data?.items || data,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data || e.message });
-  }
-});
-
 /* -------------------------------------------------------------------------- */
 /* Server Startup                                                             */
 /* -------------------------------------------------------------------------- */
@@ -1339,16 +1129,20 @@ app.get("/debug/messages", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
+    console.log(`[bridge] VERSION 2.22 - iPhone Messages as Contact Notes 📱`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
-    console.log(`[bridge] Tokens file = ${TOKENS_FILE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
-    if (GHL_INBOUND_URL) console.log(`[bridge] Forwarding inbound to ${GHL_INBOUND_URL}`);
+    console.log("");
+    console.log("📋 Message Flow:");
+    console.log("  • Contact → You: Conversation thread (LEFT side)");
+    console.log("  • You → Contact (iPhone): Contact Notes with 📱 header");
+    console.log("  • GHL → Contact: Delivered via BlueBubbles");
+    console.log("");
     if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
     if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
   });
 })();
 
-// Graceful shutdown - persist tokens before exit
 process.on("SIGTERM", async () => { try { await saveTokenStore(); } finally { process.exit(0); } });
 process.on("SIGINT",  async () => { try { await saveTokenStore(); } finally { process.exit(0); } });
