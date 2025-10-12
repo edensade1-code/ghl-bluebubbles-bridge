@@ -1,7 +1,7 @@
-// index.js - VERSION 2.13 (2025-01-06)
+// index.js - VERSION 2.15 (2025-01-06)
 // Eden iMessage Bridge — HighLevel (GHL) ↔ BlueBubbles  
-// Fixed: Use correct endpoint based on direction (inbound vs outbound)
-// DEPLOY THIS VERSION - proper message direction display
+// Fixed: Use /outbound endpoint for iPhone messages (already sent externally)
+// DEPLOY THIS VERSION - proper message mirroring without duplicates
 
 import express from "express";
 import cors from "cors";
@@ -466,12 +466,12 @@ const pushIntoGhl = async ({
     message: text,
   };
 
-  // FIX: Use different endpoint based on direction
-  // inbound = contact sent to you → /inbound
-  // outbound = you sent to contact → regular /messages
+  // FIX: Use different endpoints:
+  // /inbound = contact sent to you (GHL receives it)
+  // /outbound = you sent externally (already sent, just record it in GHL)
   const endpoint = direction === "inbound" 
     ? `${LC_API}/conversations/messages/inbound`
-    : `${LC_API}/conversations/messages`;
+    : `${LC_API}/conversations/messages/outbound`;
 
   try {
     const r = await axios.post(endpoint, body, {
@@ -496,7 +496,8 @@ const pushIntoGhl = async ({
     const status = e?.response?.status;
     const data = e?.response?.data;
     
-    console.error("[GHL] push failed:", status, data || e.message);
+    console.error("[GHL] push failed:", status, data || e.message, "endpoint:", 
+      direction === "inbound" ? "/inbound" : "/outbound");
     return null;
   }
 };
@@ -693,8 +694,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
 
-    // From here: message is either from contact OR from your iPhone directly
-    // We want to process BOTH cases
+    // Process all messages: from contact (inbound) AND from iPhone (outbound mirror)
 
     const any = getAnyLocation();
     if (!any) {
@@ -741,14 +741,10 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // FIX: Determine direction
-    // If isFromMe=true → YOU sent from iPhone → direction=outbound
-    // If isFromMe=false → CONTACT sent → direction=inbound
+    // FIX: Determine direction based on isFromMe
+    // isFromMe=true → You sent from iPhone (already sent, just mirror to GHL)
+    // isFromMe=false → Contact sent to you (inbound)
     const direction = isFromMe ? "outbound" : "inbound";
-    
-    // For GHL, ALWAYS use this mapping:
-    // fromNumber = parking/location number (your business identity)
-    // toNumber = contact's phone
     const fromNumber = locationNumber;
     const toNumber = contactE164;
 
