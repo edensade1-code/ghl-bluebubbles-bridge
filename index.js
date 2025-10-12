@@ -1,4 +1,4 @@
-// index.js - VERSION 2.20 (2025-01-08)
+// index.js - VERSION 2.21 (2025-01-08)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
@@ -22,27 +22,28 @@
 //    - Outbound tracker remembers messages WE sent
 //    - Prevents duplicate messages
 //
-// 📋 WHAT WE'RE TESTING IN VERSION 2.20:
+// 📋 WHAT WE'RE TESTING IN VERSION 2.21:
 // ---------------------------------------
-// PROGRESS! We're getting different errors which means we're closer!
+// ALL type values failed! Time to try a different field name.
 //
-// ERROR EVOLUTION:
-// v2.17: 'type must be a valid enum value' (with type: "SMS")
-// v2.18: 'type must be a valid enum value', 'type should not be empty' (no type)
-// v2.19: 'No call object passed in body' (with type: "Call")
+// ERROR HISTORY:
+// v2.17: type: "SMS" → 422 "type must be a valid enum value"
+// v2.18: (no type) → 422 "type should not be empty"
+// v2.19: type: "Call" → 400 "No call object passed in body"
+// v2.20: type: "Custom" → 422 "type must be a valid enum value"
 //
-// DIAGNOSIS: type: "Call" requires call-specific fields (duration, status, etc.)
-// That's not what we need for text messages!
+// NEW HYPOTHESIS: Maybe /outbound uses "messageType" instead of "type"
+// In GHL webhook payloads, we see "messageType": "SMS" being used
+// Let's try that field name instead!
 //
-// FIX ATTEMPT #3 (this version): Try type: "Custom"
-// - GHL docs mention "Custom" type for custom conversation providers
-// - Quote from docs: "Add Inbound Message API: Use type 'Custom'"
-// - This should be the correct type for our iMessage custom provider
+// FIX ATTEMPT #4 (this version): Use messageType: "SMS" instead of type
+// - Webhook payloads use "messageType" not "type"
+// - Maybe the API expects the same field name
 //
-// If "Custom" fails, next attempts:
-// - Try type: "Live_Chat"
-// - Try removing conversationProviderId (maybe it conflicts with type)
-// - Search for the actual enum values in GHL API schema
+// If this fails, next nuclear option:
+// - Use /inbound for BOTH directions (let GHL figure it out)
+// - Contact GHL support to ask what the correct type value is
+// - Check if conversation providers can even use /outbound endpoint
 //
 // 📝 VERSION HISTORY & WHAT WE TRIED:
 // ------------------------------------
@@ -654,17 +655,13 @@ const pushIntoGhl = async ({
     message: text,
   };
 
-  // VERSION 2.20 CHANGE: Try type: "Custom" for custom providers
-  // v2.19 showed that type: "Call" requires call-specific fields
-  // Error was: "No call object passed in body" (400 Bad Request)
+  // VERSION 2.21 CHANGE: Try "messageType" instead of "type"
+  // ALL type values failed (SMS, Call, Custom, empty)
+  // Looking at GHL webhook payloads, they use "messageType": "SMS"
+  // Maybe the API expects "messageType" field instead of "type"!
   //
-  // REASONING: GHL documentation specifically mentions:
-  // "Add Inbound Message API: Use type 'Custom'. You can also set 'altId'."
-  // This is for CUSTOM conversation providers (which is what we are!)
-  //
-  // Why not "Call"? Because that requires call metadata (duration, status, etc.)
-  // Why not "SMS"? Because that's for actual SMS/carrier integrations
-  // "Custom" should be the right choice for our iMessage custom provider!
+  // REASONING: Webhooks use "messageType", so maybe the API does too
+  // This would explain why ALL our type values were rejected - wrong field name!
 
   if (direction === "inbound") {
     // For messages FROM contact TO you
@@ -682,19 +679,20 @@ const pushIntoGhl = async ({
     }
     body.conversationId = conversationId;
     
-    // VERSION 2.20 TEST: Use type: "Custom" for custom conversation provider
-    body.type = "Custom";
+    // VERSION 2.21 TEST: Use messageType instead of type
+    body.messageType = "SMS";
     
-    // What we've tried so far:
-    // ✗ type: "SMS"     → 422 "type must be a valid enum value"
-    // ✗ (no type)       → 422 "type should not be empty"
-    // ✗ type: "Call"    → 400 "No call object passed in body"
-    // ⏳ type: "Custom" → Testing now!
+    // What we've tried for "type" field:
+    // ✗ type: "SMS"    → 422 "type must be a valid enum value"
+    // ✗ (no type)      → 422 "type should not be empty"
+    // ✗ type: "Call"   → 400 "No call object passed in body"
+    // ✗ type: "Custom" → 422 "type must be a valid enum value"
+    // ⏳ messageType: "SMS" → Testing now!
     //
-    // If this fails, next attempts:
-    // - type: "Live_Chat"
-    // - type: "Email" (maybe for generic external messaging?)
-    // - Check if conversationProviderId conflicts with type field
+    // If messageType fails, we'll try:
+    // - Use /inbound for both directions
+    // - Remove conversationProviderId (maybe it conflicts)
+    // - Just give up on showing iPhone messages on right side 😅
   }
 
   // Choose endpoint based on direction
@@ -1209,7 +1207,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.20",
+    version: "2.21",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     inboundForward: !!GHL_INBOUND_URL,
