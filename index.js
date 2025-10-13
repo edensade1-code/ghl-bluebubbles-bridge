@@ -1,8 +1,8 @@
-// index.js - VERSION 2.25 (2025-10-12)
+// index.js - VERSION 2.26 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-// LATEST UPDATE: Added attachment support - photos and files now sync to GHL!
+// LATEST UPDATE: Full outbound attachment support! GHL → Contact now sends images!
 // ============================================================================
 
 import express from "express";
@@ -23,7 +23,7 @@ const app = express();
 /* -------------------------------------------------------------------------- */
 app.use(
   express.json({
-    limit: "10mb", // Increased for attachments
+    limit: "10mb",
     verify: (req, _res, buf) => {
       try { req.rawBody = buf.toString("utf8"); } catch { req.rawBody = ""; }
     },
@@ -149,7 +149,7 @@ const isRecentInbound = (k) => {
   const expiry = recentInboundKeys.get(k);
   if (!expiry) return false;
   if (expiry < Date.now()) {
-    recentInboundKeys.delete(k);
+    recentInboundKeys.delete(key);
     return false;
   }
   return true;
@@ -302,6 +302,32 @@ const bbGetBuffer = async (path) => {
     return data;
   } catch (err) {
     console.error("[bbGetBuffer] failed:", path, err?.response?.status, err.message);
+    throw err;
+  }
+};
+
+const bbUploadAttachment = async (chatGuid, buffer, filename) => {
+  try {
+    const form = new FormData();
+    form.append('attachment', buffer, {
+      filename: filename || 'attachment',
+      contentType: 'application/octet-stream'
+    });
+    form.append('chatGuid', chatGuid);
+    form.append('name', filename || 'attachment');
+
+    const url = `${BB_BASE}/api/v1/message/attachment?guid=${encodeURIComponent(BB_GUID)}`;
+    
+    const { data } = await axios.post(url, form, {
+      headers: form.getHeaders(),
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: 60000,
+    });
+    
+    return data;
+  } catch (err) {
+    console.error("[bbUploadAttachment] failed:", err?.response?.status, err?.response?.data || err.message);
     throw err;
   }
 };
@@ -482,6 +508,20 @@ async function downloadBBAttachment(attachmentGuid) {
   }
 }
 
+async function downloadGHLAttachment(url) {
+  try {
+    console.log("[attachment] downloading from GHL:", url);
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: 30000
+    });
+    return response.data;
+  } catch (e) {
+    console.error("[attachment] GHL download failed:", e.message);
+    return null;
+  }
+}
+
 async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) {
   try {
     console.log("[attachment] uploading to GHL:", filename, mimeType);
@@ -517,6 +557,74 @@ async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) 
 }
 
 /* -------------------------------------------------------------------------- */
+/* Get Message with Attachments from GHL                                     */
+/* -------------------------------------------------------------------------- */
+
+async function getMessageWithAttachments(locationId, accessToken, contactId, messageText) {
+  try {
+    console.log("[ghl] fetching recent messages to find attachments...");
+    
+    // Get recent messages from this contact's conversation
+    const response = await axios.get(
+      `${LC_API}/conversations/search`,
+      {
+        headers: lcHeaders(accessToken),
+        params: {
+          locationId,
+          contactId,
+          limit: 10,
+          sort: 'desc'
+        },
+        timeout: 15000
+      }
+    );
+
+    const conversations = response?.data?.conversations || [];
+    if (conversations.length === 0) {
+      console.log("[ghl] no conversations found");
+      return null;
+    }
+
+    const conversationId = conversations[0].id;
+    console.log("[ghl] found conversation:", conversationId);
+
+    // Get messages from this conversation
+    const messagesResponse = await axios.get(
+      `${LC_API}/conversations/messages`,
+      {
+        headers: lcHeaders(accessToken),
+        params: {
+          conversationId,
+          limit: 20,
+          type: 'SMS'
+        },
+        timeout: 15000
+      }
+    );
+
+    const messages = messagesResponse?.data?.messages || [];
+    
+    // Find the message we just sent (matching text)
+    const recentMessage = messages.find(m => 
+      m.body === messageText && 
+      m.direction === 'outbound' &&
+      (Date.now() - new Date(m.dateAdded).getTime()) < 10000 // Within last 10 seconds
+    );
+
+    if (recentMessage && recentMessage.attachments && recentMessage.attachments.length > 0) {
+      console.log(`[ghl] found message with ${recentMessage.attachments.length} attachment(s)`);
+      return recentMessage.attachments;
+    }
+
+    console.log("[ghl] no attachments found in recent message");
+    return null;
+  } catch (e) {
+    console.error("[ghl] failed to fetch message:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Push Messages to GHL with Attachments                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -530,11 +638,9 @@ const pushToGhlThread = async ({
   timestamp,
   attachments = [],
 }) => {
-  // Format message based on who sent it
   let messageBody;
   
   if (isFromMe) {
-    // iPhone message - add clear header
     const date = timestamp ? new Date(timestamp) : new Date();
     const timeStr = date.toLocaleTimeString('en-US', { 
       hour: 'numeric', 
@@ -549,11 +655,9 @@ const pushToGhlThread = async ({
 
 ${text || ''}`;
   } else {
-    // Contact message
     messageBody = text || '';
   }
 
-  // Handle attachments
   let mediaUrls = [];
   
   if (attachments && attachments.length > 0) {
@@ -565,14 +669,12 @@ ${text || ''}`;
         const filename = att.transferName || att.filename || 'attachment';
         const mimeType = att.mimeType || att.mime || 'application/octet-stream';
         
-        // Download from BlueBubbles
         const buffer = await downloadBBAttachment(attGuid);
         if (!buffer) {
           console.error("[GHL] failed to download attachment:", attGuid);
           continue;
         }
         
-        // Upload to GHL
         const uploaded = await uploadToGHL(locationId, accessToken, buffer, filename, mimeType);
         if (uploaded && uploaded.url) {
           mediaUrls.push(uploaded.url);
@@ -584,7 +686,6 @@ ${text || ''}`;
     }
   }
 
-  // If message has ONLY attachments and no text, add a default message
   if ((!messageBody || !messageBody.trim()) && mediaUrls.length > 0) {
     if (isFromMe) {
       const date = timestamp ? new Date(timestamp) : new Date();
@@ -613,7 +714,6 @@ ${text || ''}`;
     altType: "iMessage",
   };
 
-  // Add media URLs if we have them
   if (mediaUrls.length > 0) {
     body.attachments = mediaUrls;
   }
@@ -652,7 +752,7 @@ ${text || ''}`;
 };
 
 /* -------------------------------------------------------------------------- */
-/* Provider Send (Delivery URL) - GHL → iMessage                             */
+/* Provider Send (Delivery URL) - GHL → iMessage WITH ATTACHMENTS           */
 /* -------------------------------------------------------------------------- */
 
 function extractToAndMessage(rawBody = {}) {
@@ -707,8 +807,25 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
 
+    const chatGuid = chatGuidForPhone(e164);
+
+    // Check if message has attachments by querying GHL API
+    const any = getAnyLocation();
+    let ghlAttachments = null;
+    
+    if (any) {
+      const { locationId } = any;
+      const accessToken = await getValidAccessToken(locationId);
+      const contactId = await findContactIdByPhone(locationId, e164);
+      
+      if (accessToken && contactId) {
+        ghlAttachments = await getMessageWithAttachments(locationId, accessToken, contactId, String(message));
+      }
+    }
+
+    // Send text message first
     const payload = {
-      chatGuid: chatGuidForPhone(e164),
+      chatGuid,
       tempGuid: newTempGuid("temp-bridge"),
       message: String(message),
       method: "apple-script",
@@ -716,7 +833,31 @@ const handleProviderSend = async (req, res) => {
     
     const data = await bbPost("/api/v1/message/text", payload);
 
-    rememberOutbound(String(message), payload.chatGuid);
+    // If we found attachments, send them separately
+    if (ghlAttachments && ghlAttachments.length > 0) {
+      console.log(`[provider] sending ${ghlAttachments.length} attachment(s) to BlueBubbles`);
+      
+      for (const attachment of ghlAttachments) {
+        try {
+          const attachmentUrl = attachment.url || attachment.src;
+          if (!attachmentUrl) continue;
+
+          const filename = attachment.name || 'attachment';
+          
+          // Download from GHL
+          const buffer = await downloadGHLAttachment(attachmentUrl);
+          if (!buffer) continue;
+
+          // Upload to BlueBubbles
+          const bbResult = await bbUploadAttachment(chatGuid, buffer, filename);
+          console.log("[provider] attachment sent to BlueBubbles:", bbResult?.guid || 'success');
+        } catch (e) {
+          console.error("[provider] failed to send attachment:", e.message);
+        }
+      }
+    }
+
+    rememberOutbound(String(message), chatGuid);
 
     return res.status(200).json({
       ok: true,
@@ -725,6 +866,7 @@ const handleProviderSend = async (req, res) => {
       provider: "eden-imessage",
       relay: BB_BASE,
       id: data?.guid || data?.data?.guid || payload.tempGuid,
+      attachmentCount: ghlAttachments?.length || 0,
       data,
     });
   } catch (err) {
@@ -787,7 +929,6 @@ app.post("/webhook", async (req, res) => {
       src.timestamp ?? 
       Date.now();
 
-    // Extract attachments
     const attachments = 
       data.attachments ??
       data.message?.attachments ??
@@ -810,7 +951,6 @@ app.post("/webhook", async (req, res) => {
       attachmentCount: attachments?.length || 0,
     });
 
-    // Messages with ONLY attachments might not have text
     if (!messageText && !hasAttachments && !attachments?.length) {
       console.log("[inbound] no text or attachments - ignoring");
       return res.status(200).json({ ok: true });
@@ -875,7 +1015,6 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // Push to conversation thread with attachments
     if (isFromMe) {
       console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''}`);
     } else {
@@ -959,8 +1098,8 @@ app.get("/oauth/start", (_req, res) => {
     "conversations.readonly",
     "contacts.readonly",
     "locations.readonly",
-    "medias.write",  // Added for attachment uploads
-    "medias.readonly",  // Added for attachment management
+    "medias.write",
+    "medias.readonly",
   ].join(" ");
 
   const params = new URLSearchParams({
@@ -1087,7 +1226,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.25 - Attachments</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.26 - Full Attachments</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1116,24 +1255,25 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.25",
-    mode: "all-messages-with-attachments-as-imessage",
+    version: "2.26",
+    mode: "full-bidirectional-attachments",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     features: {
       textMessages: true,
-      attachments: true,
+      inboundAttachments: true,
+      outboundAttachments: true,
       photos: true,
       files: true,
       privacyFilter: true,
     },
     messageFlow: {
-      "contact→you (in GHL)": "Conversation thread as iMessage with attachments",
-      "you→contact (iPhone, in GHL)": "Conversation thread as iMessage with attachments + header",
-      "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
-      "ghl→contact": "/provider/deliver → BlueBubbles",
+      "contact→you": "Thread as iMessage with attachments",
+      "you→contact (iPhone)": "Thread as iMessage with attachments + header",
+      "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS",
+      "non-contact": "IGNORED (privacy filter)",
     },
   });
 });
@@ -1187,22 +1327,23 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.25 - iMessage with Attachments 📎💬`);
+    console.log(`[bridge] VERSION 2.26 - Full Bidirectional Attachments 📎📸💬`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Features:");
-    console.log("  ✅ Text messages");
-    console.log("  ✅ Photos & images");
-    console.log("  ✅ Files & documents");
+    console.log("  ✅ Text messages (all directions)");
+    console.log("  ✅ Photos & images (all directions)");
+    console.log("  ✅ Files & documents (all directions)");
+    console.log("  ✅ GHL → Contact WITH attachments!");
     console.log("  ✅ Privacy filter (no auto-contact creation)");
     console.log("");
     console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Thread as iMessage with attachments [must exist in GHL]");
-    console.log("  • You → Contact (iPhone): Thread as iMessage with attachments + header [must exist in GHL]");
-    console.log("  • Non-Contact messages: IGNORED (privacy filter)");
-    console.log("  • GHL → Contact: Delivered via BlueBubbles");
+    console.log("  • Contact → You: Thread as iMessage with attachments");
+    console.log("  • You → Contact (iPhone): Thread as iMessage with attachments + header");
+    console.log("  • GHL → Contact: Delivered via BlueBubbles WITH ATTACHMENTS!");
+    console.log("  • Non-Contact: IGNORED (privacy filter)");
     console.log("");
     if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
     if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
