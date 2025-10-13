@@ -600,7 +600,11 @@ async function getMessageWithAttachments(locationId, accessToken, contactId, mes
       }
     );
 
-    const messages = messagesResponse?.data?.messages || [];
+    const messages = Array.isArray(messagesResponse?.data?.messages) 
+      ? messagesResponse.data.messages 
+      : (messagesResponse?.data ? [messagesResponse.data] : []);
+    
+    console.log(`[ghl] received ${messages.length} message(s) from API`);
     
     // Find the message we just sent (matching text)
     const recentMessage = messages.find(m => 
