@@ -1,4 +1,4 @@
-// index.js - VERSION 2.22 (2025-01-08)
+// index.js - VERSION 2.23 (2025-01-08)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
@@ -6,10 +6,10 @@
 // 🎯 WHAT'S NEW IN VERSION 2.23:
 // -------------------------------
 // ✅ ALL messages now appear in the conversation thread (no side notes!)
-// ✅ iPhone-sent messages have a special "👤 YOU (via iPhone)" header
+// ✅ iPhone-sent messages have a special header for marketplace app styling
 // ✅ Contact messages appear normally
 // ✅ Both directions in ONE conversation thread
-// ✅ Clear visual distinction with emoji + header
+// ✅ Marketplace app CSS/JS will make iPhone messages blue & right-aligned
 // ✅ Clean, chronological message flow
 //
 // 📋 WHY WE USE /INBOUND FOR BOTH DIRECTIONS:
@@ -20,18 +20,25 @@
 //
 // Solution: Use /inbound for BOTH directions with clear visual identifiers:
 // - Contact messages: Appear normally on LEFT side
-// - iPhone messages: Appear on LEFT side with "👤 YOU (via iPhone)" header
+// - iPhone messages: Appear with header (marketplace JS/CSS styles them blue)
 //
 // This keeps everything in ONE conversation thread, chronologically ordered,
-// with clear visual distinction between who sent what.
+// with marketplace app styling to make iPhone messages look like outbound.
 //
-// 📋 MESSAGE FLOW:
+// 📝 MESSAGE FLOW:
 // ----------------
 // CONTACT → YOU (contact must exist in GHL):
-//   BlueBubbles → /webhook → /conversations/messages/inbound → LEFT side
+//   BlueBubbles → /webhook → /conversations/messages/inbound → Thread (normal)
 //
 // YOU → CONTACT (from iPhone, contact must exist in GHL):
-//   BlueBubbles → /webhook → /contacts/:contactId/notes → Contact Notes tab
+//   BlueBubbles → /webhook → /conversations/messages/inbound → Thread (with header)
+//   Message format: 
+//   ━━━━━━━━━━━━━━━━━━━━
+//   👤 YOU (sent from iPhone)
+//   ⏰ [TIME]
+//   ━━━━━━━━━━━━━━━━━━━━
+//   
+//   [MESSAGE]
 //
 // NON-CONTACT → YOU or YOU → NON-CONTACT:
 //   BlueBubbles → /webhook → IGNORED (privacy filter)
@@ -517,7 +524,7 @@ const pushToGhlThread = async ({
   let messageBody;
   
   if (isFromMe) {
-    // iPhone message - add clear header to show it's from YOU
+    // iPhone message - add clear header for marketplace app styling
     const date = timestamp ? new Date(timestamp) : new Date();
     const timeStr = date.toLocaleTimeString('en-US', { 
       hour: 'numeric', 
@@ -525,7 +532,7 @@ const pushToGhlThread = async ({
       hour12: true 
     });
     
-    // More prominent visual separator
+    // More prominent visual separator (marketplace JS will detect and style this)
     messageBody = `━━━━━━━━━━━━━━━━━━━━
 👤 YOU (sent from iPhone)
 ⏰ ${timeStr}
@@ -704,7 +711,6 @@ app.post("/webhook", async (req, res) => {
       data.isFromMe ?? data.message?.isFromMe ?? src.isFromMe ?? false
     );
 
-    // Get timestamp from webhook
     const timestamp = 
       data.dateCreated ?? 
       data.message?.dateCreated ?? 
@@ -778,8 +784,6 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    let pushed;
-
     // Push to conversation thread with appropriate formatting
     if (isFromMe) {
       console.log("[inbound] IPHONE MESSAGE - pushing to thread with header");
@@ -787,7 +791,7 @@ app.post("/webhook", async (req, res) => {
       console.log("[inbound] CONTACT MESSAGE - pushing to thread");
     }
     
-    pushed = await pushToGhlThread({
+    const pushed = await pushToGhlThread({
       locationId,
       accessToken,
       contactId,
@@ -1022,7 +1026,7 @@ app.get("/", (_req, res) => {
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     messageFlow: {
       "contact→you (in GHL)": "Conversation thread (normal message)",
-      "you→contact (iPhone, in GHL)": "Conversation thread (with '👤 YOU (via iPhone)' header)",
+      "you→contact (iPhone, in GHL)": "Conversation thread (with header for styling)",
       "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
       "ghl→contact": "/provider/deliver → BlueBubbles",
     },
@@ -1085,7 +1089,7 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
     console.log("");
     console.log("📋 Message Flow:");
     console.log("  • Contact → You: Thread (normal message) [must exist in GHL]");
-    console.log("  • You → Contact (iPhone): Thread with '👤 YOU (via iPhone)' header [must exist in GHL]");
+    console.log("  • You → Contact (iPhone): Thread with header for styling [must exist in GHL]");
     console.log("  • Non-Contact messages: IGNORED (privacy filter)");
     console.log("  • GHL → Contact: Delivered via BlueBubbles");
     console.log("");
