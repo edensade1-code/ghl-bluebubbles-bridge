@@ -613,6 +613,10 @@ async function getMessageWithAttachments(locationId, accessToken, contactId, mes
       (Date.now() - new Date(m.dateAdded).getTime()) < 10000 // Within last 10 seconds
     );
 
+    if (recentMessage) {
+      console.log("[ghl] found recent message:", JSON.stringify(recentMessage, null, 2));
+    }
+
     if (recentMessage && recentMessage.attachments && recentMessage.attachments.length > 0) {
       console.log(`[ghl] found message with ${recentMessage.attachments.length} attachment(s)`);
       return recentMessage.attachments;
