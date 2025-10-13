@@ -590,11 +590,10 @@ async function getMessageWithAttachments(locationId, accessToken, contactId, mes
 
     // Get messages from this conversation
     const messagesResponse = await axios.get(
-      `${LC_API}/conversations/messages`,
+      `${LC_API}/conversations/${conversationId}/messages`,
       {
         headers: lcHeaders(accessToken),
         params: {
-          conversationId,
           limit: 20,
           type: 'SMS'
         },
