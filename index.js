@@ -1,9 +1,8 @@
-// index.js - VERSION 2.24 (2025-10-12)
+// index.js - VERSION 2.25 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-// LATEST UPDATE: Changed message type from "SMS" to "Custom" with altType "iMessage"
-//                so contact messages show as "iMessage" instead of generic "SMS"
+// LATEST UPDATE: Added attachment support - photos and files now sync to GHL!
 // ============================================================================
 
 import express from "express";
@@ -15,6 +14,7 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 import qs from "querystring";
 import fs from "fs/promises";
+import FormData from "form-data";
 
 const app = express();
 
@@ -23,13 +23,13 @@ const app = express();
 /* -------------------------------------------------------------------------- */
 app.use(
   express.json({
-    limit: "1mb",
+    limit: "10mb", // Increased for attachments
     verify: (req, _res, buf) => {
       try { req.rawBody = buf.toString("utf8"); } catch { req.rawBody = ""; }
     },
   })
 );
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(bodyParser.text({ type: ["text/*"] }));
 
 app.use(
@@ -292,6 +292,20 @@ const bbGet = async (path) => {
   }
 };
 
+const bbGetBuffer = async (path) => {
+  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+  try {
+    const { data } = await axios.get(url, { 
+      timeout: 30000,
+      responseType: 'arraybuffer'
+    });
+    return data;
+  } catch (err) {
+    console.error("[bbGetBuffer] failed:", path, err?.response?.status, err.message);
+    throw err;
+  }
+};
+
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const auth = req.header("Authorization") || "";
@@ -454,7 +468,56 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Push ALL Messages to GHL Conversation Thread                               */
+/* Attachment Handling                                                        */
+/* -------------------------------------------------------------------------- */
+
+async function downloadBBAttachment(attachmentGuid) {
+  try {
+    console.log("[attachment] downloading from BB:", attachmentGuid);
+    const buffer = await bbGetBuffer(`/api/v1/attachment/${encodeURIComponent(attachmentGuid)}/download`);
+    return buffer;
+  } catch (e) {
+    console.error("[attachment] download failed:", e.message);
+    return null;
+  }
+}
+
+async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) {
+  try {
+    console.log("[attachment] uploading to GHL:", filename, mimeType);
+    
+    const form = new FormData();
+    form.append('file', buffer, {
+      filename: filename || 'attachment',
+      contentType: mimeType || 'application/octet-stream'
+    });
+    form.append('locationId', locationId);
+
+    const response = await axios.post(
+      `${LC_API}/medias/upload-file`,
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          'Authorization': `Bearer ${accessToken}`,
+          'Version': LC_VERSION
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 60000
+      }
+    );
+
+    console.log("[attachment] upload success:", response.data);
+    return response.data;
+  } catch (e) {
+    console.error("[attachment] upload failed:", e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Push Messages to GHL with Attachments                                      */
 /* -------------------------------------------------------------------------- */
 
 const pushToGhlThread = async ({
@@ -465,12 +528,13 @@ const pushToGhlThread = async ({
   fromNumber,
   isFromMe,
   timestamp,
+  attachments = [],
 }) => {
   // Format message based on who sent it
   let messageBody;
   
   if (isFromMe) {
-    // iPhone message - add clear header for marketplace app styling
+    // iPhone message - add clear header
     const date = timestamp ? new Date(timestamp) : new Date();
     const timeStr = date.toLocaleTimeString('en-US', { 
       hour: 'numeric', 
@@ -478,30 +542,85 @@ const pushToGhlThread = async ({
       hour12: true 
     });
     
-    // More prominent visual separator (marketplace JS will detect and style this)
     messageBody = `━━━━━━━━━━━━━━━━━━━━
 👤 YOU (sent from iPhone)
 ⏰ ${timeStr}
 ━━━━━━━━━━━━━━━━━━━━
 
-${text}`;
+${text || ''}`;
   } else {
-    // Contact message - send as-is
-    messageBody = text;
+    // Contact message
+    messageBody = text || '';
+  }
+
+  // Handle attachments
+  let mediaUrls = [];
+  
+  if (attachments && attachments.length > 0) {
+    console.log(`[GHL] processing ${attachments.length} attachment(s)`);
+    
+    for (const att of attachments) {
+      try {
+        const attGuid = att.guid || att.id;
+        const filename = att.transferName || att.filename || 'attachment';
+        const mimeType = att.mimeType || att.mime || 'application/octet-stream';
+        
+        // Download from BlueBubbles
+        const buffer = await downloadBBAttachment(attGuid);
+        if (!buffer) {
+          console.error("[GHL] failed to download attachment:", attGuid);
+          continue;
+        }
+        
+        // Upload to GHL
+        const uploaded = await uploadToGHL(locationId, accessToken, buffer, filename, mimeType);
+        if (uploaded && uploaded.url) {
+          mediaUrls.push(uploaded.url);
+          console.log("[GHL] attachment uploaded:", uploaded.url);
+        }
+      } catch (e) {
+        console.error("[GHL] attachment processing error:", e.message);
+      }
+    }
+  }
+
+  // If message has ONLY attachments and no text, add a default message
+  if ((!messageBody || !messageBody.trim()) && mediaUrls.length > 0) {
+    if (isFromMe) {
+      const date = timestamp ? new Date(timestamp) : new Date();
+      const timeStr = date.toLocaleTimeString('en-US', { 
+        hour: 'numeric', 
+        minute: '2-digit',
+        hour12: true 
+      });
+      messageBody = `━━━━━━━━━━━━━━━━━━━━
+👤 YOU (sent from iPhone)
+⏰ ${timeStr}
+━━━━━━━━━━━━━━━━━━━━
+
+📎 Sent ${mediaUrls.length} attachment(s)`;
+    } else {
+      messageBody = `📎 ${mediaUrls.length} attachment(s)`;
+    }
   }
 
   const body = {
     locationId,
     contactId,
     message: messageBody,
-    type: "Custom",  // ✨ CHANGED FROM "SMS" TO "Custom"
+    type: "Custom",
     conversationProviderId: CONVERSATION_PROVIDER_ID,
-    altType: "iMessage",  // ✨ ADDED - This shows "iMessage" in the UI
+    altType: "iMessage",
   };
+
+  // Add media URLs if we have them
+  if (mediaUrls.length > 0) {
+    body.attachments = mediaUrls;
+  }
 
   const endpoint = `${LC_API}/conversations/messages/inbound`;
 
-  console.log(`[GHL] pushing to thread (${isFromMe ? 'iPhone' : 'contact'}):`, endpoint);
+  console.log(`[GHL] pushing to thread (${isFromMe ? 'iPhone' : 'contact'}) with ${mediaUrls.length} attachment(s)`);
 
   try {
     const r = await axios.post(endpoint, body, {
@@ -519,7 +638,8 @@ ${text}`;
       messageId: resp.messageId || resp.id,
       contactId,
       isFromMe,
-      type: "iMessage", // ✨ Now shows as iMessage!
+      type: "iMessage",
+      attachments: mediaUrls.length,
     });
     return resp;
   } catch (e) {
@@ -667,16 +787,37 @@ app.post("/webhook", async (req, res) => {
       src.timestamp ?? 
       Date.now();
 
+    // Extract attachments
+    const attachments = 
+      data.attachments ??
+      data.message?.attachments ??
+      src.attachments ??
+      [];
+
+    const hasAttachments = Boolean(
+      data.hasAttachments ?? 
+      data.message?.hasAttachments ?? 
+      (attachments && attachments.length > 0)
+    );
+
     console.log("[inbound] EXTRACTED:", {
       messageText: messageText?.slice(0, 50),
       fromRaw,
       chatGuid,
       isFromMe,
       timestamp,
+      hasAttachments,
+      attachmentCount: attachments?.length || 0,
     });
 
-    if (!messageText || !fromRaw) {
-      console.log("[inbound] missing data - ignoring");
+    // Messages with ONLY attachments might not have text
+    if (!messageText && !hasAttachments && !attachments?.length) {
+      console.log("[inbound] no text or attachments - ignoring");
+      return res.status(200).json({ ok: true });
+    }
+
+    if (!fromRaw) {
+      console.log("[inbound] no sender info - ignoring");
       return res.status(200).json({ ok: true });
     }
 
@@ -722,7 +863,8 @@ app.post("/webhook", async (req, res) => {
         locationId, 
         phone: contactE164,
         isFromMe,
-        messagePreview: messageText?.slice(0, 30)
+        messagePreview: messageText?.slice(0, 30),
+        hasAttachments
       });
       return res.status(200).json({ ok: true, dropped: "no-contact", reason: "privacy-filter" });
     }
@@ -733,11 +875,11 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "no-access-token" });
     }
 
-    // Push to conversation thread with appropriate formatting
+    // Push to conversation thread with attachments
     if (isFromMe) {
-      console.log("[inbound] IPHONE MESSAGE - pushing to thread with header");
+      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''}`);
     } else {
-      console.log("[inbound] CONTACT MESSAGE - pushing to thread as iMessage");
+      console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''}`);
     }
     
     const pushed = await pushToGhlThread({
@@ -748,6 +890,7 @@ app.post("/webhook", async (req, res) => {
       fromNumber: locationNumber,
       isFromMe,
       timestamp,
+      attachments: hasAttachments ? attachments : [],
     });
 
     if (!pushed) {
@@ -755,7 +898,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage`);
+    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''}`);
 
     rememberPush({
       locationId,
@@ -765,6 +908,8 @@ app.post("/webhook", async (req, res) => {
       fromNumber: locationNumber,
       toNumber: contactE164,
       isFromMe,
+      hasAttachments,
+      attachmentCount: attachments?.length || 0,
       handledAs: "conversation-thread-imessage",
     });
 
@@ -779,6 +924,8 @@ app.post("/webhook", async (req, res) => {
             to: locationNumber,
             chatGuid,
             isFromMe,
+            hasAttachments,
+            attachmentCount: attachments?.length || 0,
             handledAs: "conversation-thread-imessage",
             receivedAt: new Date().toISOString(),
           },
@@ -812,6 +959,8 @@ app.get("/oauth/start", (_req, res) => {
     "conversations.readonly",
     "contacts.readonly",
     "locations.readonly",
+    "medias.write",  // Added for attachment uploads
+    "medias.readonly",  // Added for attachment management
   ].join(" ");
 
   const params = new URLSearchParams({
@@ -938,7 +1087,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.24 - iMessage Type</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.25 - Attachments</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -967,15 +1116,22 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.24",
-    mode: "all-messages-in-conversation-thread-as-imessage",
+    version: "2.25",
+    mode: "all-messages-with-attachments-as-imessage",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
+    features: {
+      textMessages: true,
+      attachments: true,
+      photos: true,
+      files: true,
+      privacyFilter: true,
+    },
     messageFlow: {
-      "contact→you (in GHL)": "Conversation thread as iMessage",
-      "you→contact (iPhone, in GHL)": "Conversation thread (with header for styling) as iMessage",
+      "contact→you (in GHL)": "Conversation thread as iMessage with attachments",
+      "you→contact (iPhone, in GHL)": "Conversation thread as iMessage with attachments + header",
       "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
       "ghl→contact": "/provider/deliver → BlueBubbles",
     },
@@ -1031,14 +1187,20 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.24 - All Messages as iMessage Type 💬`);
+    console.log(`[bridge] VERSION 2.25 - iMessage with Attachments 📎💬`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
+    console.log("📋 Features:");
+    console.log("  ✅ Text messages");
+    console.log("  ✅ Photos & images");
+    console.log("  ✅ Files & documents");
+    console.log("  ✅ Privacy filter (no auto-contact creation)");
+    console.log("");
     console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Thread as iMessage [must exist in GHL]");
-    console.log("  • You → Contact (iPhone): Thread as iMessage with header [must exist in GHL]");
+    console.log("  • Contact → You: Thread as iMessage with attachments [must exist in GHL]");
+    console.log("  • You → Contact (iPhone): Thread as iMessage with attachments + header [must exist in GHL]");
     console.log("  • Non-Contact messages: IGNORED (privacy filter)");
     console.log("  • GHL → Contact: Delivered via BlueBubbles");
     console.log("");
