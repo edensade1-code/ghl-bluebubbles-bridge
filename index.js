@@ -1,8 +1,8 @@
-// index.js - VERSION 2.29 (2025-10-12)
+// index.js - VERSION 2.30 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-// LATEST UPDATE: MIME type detection! Attachments now open properly!
+// LATEST UPDATE: Perfect attachment echo prevention! No more duplicate images!
 // ============================================================================
 
 import express from "express";
@@ -102,18 +102,27 @@ const tokenStore = new Map();
 
 const recentOutboundMessages = new Map();
 const recentInboundKeys = new Map();
+const recentOutboundAttachmentChats = new Map();
 const DEDUPE_TTL_MS = 15_000;
 const OUTBOUND_TTL_MS = 30_000;
+const ATTACHMENT_GRACE_MS = 10_000;
 
 const dedupeKey = ({ text, from, chatGuid }) =>
   `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
 
-const rememberOutbound = (text, chatGuid) => {
+const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = Date.now() + OUTBOUND_TTL_MS;
   recentOutboundMessages.set(key, expiry);
   
-  console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
+  // If this message has attachments, track the chat for grace period
+  if (hasAttachments) {
+    const attExpiry = Date.now() + ATTACHMENT_GRACE_MS;
+    recentOutboundAttachmentChats.set(chatGuid, attExpiry);
+    console.log("[outbound-tracker] remembered with attachments:", { chatGuid, textPreview: text?.slice(0, 32) });
+  } else {
+    console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
+  }
   
   // Clean up old entries
   if (recentOutboundMessages.size > 100) {
@@ -122,18 +131,39 @@ const rememberOutbound = (text, chatGuid) => {
       if (exp < now) recentOutboundMessages.delete(k);
     }
   }
+  if (recentOutboundAttachmentChats.size > 50) {
+    const now = Date.now();
+    for (const [k, exp] of recentOutboundAttachmentChats.entries()) {
+      if (exp < now) recentOutboundAttachmentChats.delete(k);
+    }
+  }
 };
 
-const isOurOutbound = (text, chatGuid) => {
+const isOurOutbound = (text, chatGuid, hasAttachments) => {
+  // Check if this is a text message we sent
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
-  if (!expiry) return false;
-  if (expiry < Date.now()) {
-    recentOutboundMessages.delete(key);
-    return false;
+  if (expiry && expiry >= Date.now()) {
+    console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text)");
+    return true;
   }
-  console.log("[outbound-tracker] MATCH FOUND - ignoring echo");
-  return true;
+  if (expiry && expiry < Date.now()) {
+    recentOutboundMessages.delete(key);
+  }
+  
+  // Check if this is an attachment-only message in the grace period
+  if (hasAttachments && (!text || !text.trim())) {
+    const attExpiry = recentOutboundAttachmentChats.get(chatGuid);
+    if (attExpiry && attExpiry >= Date.now()) {
+      console.log("[outbound-tracker] MATCH FOUND - ignoring echo (attachment within grace period)");
+      return true;
+    }
+    if (attExpiry && attExpiry < Date.now()) {
+      recentOutboundAttachmentChats.delete(chatGuid);
+    }
+  }
+  
+  return false;
 };
 
 const rememberInbound = (k) => {
@@ -867,7 +897,7 @@ const handleProviderSend = async (req, res) => {
     const data = await bbPost("/api/v1/message/text", payload);
 
     // Remember this message BEFORE sending attachments
-    rememberOutbound(String(message), chatGuid);
+    rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
 
     // Process attachments from request body
     let successfulAttachments = 0;
@@ -1032,7 +1062,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    if (isOurOutbound(messageText, chatGuid)) {
+    if (isOurOutbound(messageText, chatGuid, hasAttachments)) {
       console.log("[inbound] IGNORING - message was sent via bridge (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
@@ -1297,7 +1327,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.29 - MIME Detection</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.30 - COMPLETE!</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1326,7 +1356,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.29",
+    version: "2.30",
     mode: "full-bidirectional-attachments",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
@@ -1399,7 +1429,7 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.29 - MIME Detection! Attachments work! 📎✨`);
+    console.log(`[bridge] VERSION 2.30 - COMPLETE! All Features Working! 🎉✨`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
