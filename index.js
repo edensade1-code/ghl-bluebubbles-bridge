@@ -1,63 +1,9 @@
-// index.js - VERSION 2.23 (2025-01-08)
+// index.js - VERSION 2.24 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-//
-// 🎯 WHAT'S NEW IN VERSION 2.23:
-// -------------------------------
-// ✅ ALL messages now appear in the conversation thread (no side notes!)
-// ✅ iPhone-sent messages have a special header for marketplace app styling
-// ✅ Contact messages appear normally
-// ✅ Both directions in ONE conversation thread
-// ✅ Marketplace app CSS/JS will make iPhone messages blue & right-aligned
-// ✅ Clean, chronological message flow
-//
-// 📋 WHY WE USE /INBOUND FOR BOTH DIRECTIONS:
-// --------------------------------------------
-// After thorough API research, GHL does NOT have an /outbound endpoint for
-// custom SMS conversation providers. The /outbound endpoint ONLY works for
-// CALL providers. 
-//
-// Solution: Use /inbound for BOTH directions with clear visual identifiers:
-// - Contact messages: Appear normally on LEFT side
-// - iPhone messages: Appear with header (marketplace JS/CSS styles them blue)
-//
-// This keeps everything in ONE conversation thread, chronologically ordered,
-// with marketplace app styling to make iPhone messages look like outbound.
-//
-// 📝 MESSAGE FLOW:
-// ----------------
-// CONTACT → YOU (contact must exist in GHL):
-//   BlueBubbles → /webhook → /conversations/messages/inbound → Thread (normal)
-//
-// YOU → CONTACT (from iPhone, contact must exist in GHL):
-//   BlueBubbles → /webhook → /conversations/messages/inbound → Thread (with header)
-//   Message format: 
-//   ━━━━━━━━━━━━━━━━━━━━
-//   👤 YOU (sent from iPhone)
-//   ⏰ [TIME]
-//   ━━━━━━━━━━━━━━━━━━━━
-//   
-//   [MESSAGE]
-//
-// NON-CONTACT → YOU or YOU → NON-CONTACT:
-//   BlueBubbles → /webhook → IGNORED (privacy filter)
-//
-// GHL → CONTACT:
-//   GHL → /provider/deliver → BlueBubbles → iMessage → (echo prevented)
-//
-// 🔧 REQUIRED ENV VARS:
-// ---------------------
-// BB_BASE=https://relay.asapcashhomebuyers.com
-// BB_GUID=[BlueBubbles server password]
-// CLIENT_ID=[GHL OAuth client ID]
-// CLIENT_SECRET=[GHL OAuth client secret]
-// GHL_REDIRECT_URI=https://ieden-bluebubbles-bridge-1.onrender.com/oauth/callback
-// PARKING_NUMBER=+17867334163
-// CONVERSATION_PROVIDER_ID=68d94718bcd02bcf453ccf46
-// GHL_TOKENS_BASE64=[Base64 from /oauth/start]
-// GHL_SHARED_SECRET=1b059e90-9f0d-4c78-81b0-97cd3053aa4a
-//
+// LATEST UPDATE: Changed message type from "SMS" to "Custom" with altType "iMessage"
+//                so contact messages show as "iMessage" instead of generic "SMS"
 // ============================================================================
 
 import express from "express";
@@ -548,7 +494,9 @@ ${text}`;
     locationId,
     contactId,
     message: messageBody,
-    type: "SMS",
+    type: "Custom",  // ✨ CHANGED FROM "SMS" TO "Custom"
+    conversationProviderId: CONVERSATION_PROVIDER_ID,
+    altType: "iMessage",  // ✨ ADDED - This shows "iMessage" in the UI
   };
 
   const endpoint = `${LC_API}/conversations/messages/inbound`;
@@ -571,6 +519,7 @@ ${text}`;
       messageId: resp.messageId || resp.id,
       contactId,
       isFromMe,
+      type: "iMessage", // ✨ Now shows as iMessage!
     });
     return resp;
   } catch (e) {
@@ -788,7 +737,7 @@ app.post("/webhook", async (req, res) => {
     if (isFromMe) {
       console.log("[inbound] IPHONE MESSAGE - pushing to thread with header");
     } else {
-      console.log("[inbound] CONTACT MESSAGE - pushing to thread");
+      console.log("[inbound] CONTACT MESSAGE - pushing to thread as iMessage");
     }
     
     const pushed = await pushToGhlThread({
@@ -806,7 +755,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed to thread`);
+    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage`);
 
     rememberPush({
       locationId,
@@ -816,7 +765,7 @@ app.post("/webhook", async (req, res) => {
       fromNumber: locationNumber,
       toNumber: contactE164,
       isFromMe,
-      handledAs: "conversation-thread",
+      handledAs: "conversation-thread-imessage",
     });
 
     if (GHL_INBOUND_URL) {
@@ -830,7 +779,7 @@ app.post("/webhook", async (req, res) => {
             to: locationNumber,
             chatGuid,
             isFromMe,
-            handledAs: "conversation-thread",
+            handledAs: "conversation-thread-imessage",
             receivedAt: new Date().toISOString(),
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
@@ -989,7 +938,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.23 - Thread Mode</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.24 - iMessage Type</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1018,15 +967,15 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.23",
-    mode: "all-messages-in-conversation-thread",
+    version: "2.24",
+    mode: "all-messages-in-conversation-thread-as-imessage",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     messageFlow: {
-      "contact→you (in GHL)": "Conversation thread (normal message)",
-      "you→contact (iPhone, in GHL)": "Conversation thread (with header for styling)",
+      "contact→you (in GHL)": "Conversation thread as iMessage",
+      "you→contact (iPhone, in GHL)": "Conversation thread (with header for styling) as iMessage",
       "non-contact messages": "IGNORED (privacy filter - no auto-creation)",
       "ghl→contact": "/provider/deliver → BlueBubbles",
     },
@@ -1082,14 +1031,14 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.23 - All Messages in Conversation Thread 💬`);
+    console.log(`[bridge] VERSION 2.24 - All Messages as iMessage Type 💬`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Thread (normal message) [must exist in GHL]");
-    console.log("  • You → Contact (iPhone): Thread with header for styling [must exist in GHL]");
+    console.log("  • Contact → You: Thread as iMessage [must exist in GHL]");
+    console.log("  • You → Contact (iPhone): Thread as iMessage with header [must exist in GHL]");
     console.log("  • Non-Contact messages: IGNORED (privacy filter)");
     console.log("  • GHL → Contact: Delivered via BlueBubbles");
     console.log("");
