@@ -594,8 +594,7 @@ async function getMessageWithAttachments(locationId, accessToken, contactId, mes
       {
         headers: lcHeaders(accessToken),
         params: {
-          limit: 20,
-          type: 'SMS'
+          limit: 20
         },
         timeout: 15000
       }
