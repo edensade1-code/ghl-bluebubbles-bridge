@@ -1,8 +1,8 @@
-// index.js - VERSION 2.28 (2025-10-12)
+// index.js - VERSION 2.29 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-// LATEST UPDATE: Fixed attachment upload with tempGuid + improved echo prevention!
+// LATEST UPDATE: MIME type detection! Attachments now open properly!
 // ============================================================================
 
 import express from "express";
@@ -501,6 +501,71 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 /* Attachment Handling                                                        */
 /* -------------------------------------------------------------------------- */
 
+// Detect MIME type from buffer's magic bytes
+function detectMimeType(buffer, filename = '') {
+  if (!buffer || buffer.length === 0) return 'application/octet-stream';
+  
+  const bytes = buffer.slice(0, 12);
+  
+  // PNG
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+    return 'image/png';
+  }
+  
+  // JPEG
+  if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+    return 'image/jpeg';
+  }
+  
+  // GIF
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+    return 'image/gif';
+  }
+  
+  // WEBP
+  if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return 'image/webp';
+  }
+  
+  // PDF
+  if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    return 'application/pdf';
+  }
+  
+  // ZIP
+  if (bytes[0] === 0x50 && bytes[1] === 0x4B && (bytes[2] === 0x03 || bytes[2] === 0x05)) {
+    return 'application/zip';
+  }
+  
+  // MP4
+  if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    return 'video/mp4';
+  }
+  
+  // MOV
+  if (bytes.indexOf(0x6D6F6F76) !== -1 || bytes.indexOf(0x66726565) !== -1) {
+    return 'video/quicktime';
+  }
+  
+  // Fallback to filename extension
+  const ext = filename.toLowerCase().split('.').pop();
+  const extMap = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'pdf': 'application/pdf',
+    'zip': 'application/zip',
+    'mp4': 'video/mp4',
+    'mov': 'video/quicktime',
+    'heic': 'image/heic',
+    'heif': 'image/heif',
+  };
+  
+  return extMap[ext] || 'application/octet-stream';
+}
+
 async function downloadBBAttachment(attachmentGuid) {
   try {
     console.log("[attachment] downloading from BB:", attachmentGuid);
@@ -519,7 +584,17 @@ async function downloadGHLAttachment(url) {
       responseType: 'arraybuffer',
       timeout: 30000
     });
-    return response.data;
+    
+    const buffer = Buffer.from(response.data);
+    
+    // Try to get MIME type from response headers or detect it
+    let mimeType = response.headers['content-type'];
+    if (!mimeType || mimeType === 'application/octet-stream') {
+      mimeType = detectMimeType(buffer, url);
+      console.log("[attachment] detected MIME type:", mimeType);
+    }
+    
+    return { buffer, mimeType };
   } catch (e) {
     console.error("[attachment] GHL download failed:", e.message);
     return null;
@@ -605,7 +680,7 @@ ${text || ''}`;
       try {
         const attGuid = att.guid || att.id;
         const filename = att.transferName || att.filename || 'attachment';
-        const mimeType = att.mimeType || att.mime || 'application/octet-stream';
+        let mimeType = att.mimeType || att.mime || null;
         
         const buffer = await downloadBBAttachment(attGuid);
         if (!buffer) {
@@ -613,7 +688,28 @@ ${text || ''}`;
           continue;
         }
         
-        const uploaded = await uploadToGHL(locationId, accessToken, buffer, filename, mimeType);
+        // Detect MIME type if not provided
+        if (!mimeType) {
+          mimeType = detectMimeType(buffer, filename);
+          console.log("[GHL] detected MIME type:", mimeType, "for", filename);
+        }
+        
+        // Generate proper filename with extension if needed
+        let finalFilename = filename;
+        if (!finalFilename.includes('.')) {
+          const extMap = {
+            'image/png': '.png',
+            'image/jpeg': '.jpg',
+            'image/gif': '.gif',
+            'image/webp': '.webp',
+            'application/pdf': '.pdf',
+            'video/mp4': '.mp4',
+            'video/quicktime': '.mov',
+          };
+          finalFilename += (extMap[mimeType] || '');
+        }
+        
+        const uploaded = await uploadToGHL(locationId, accessToken, buffer, finalFilename, mimeType);
         if (uploaded && uploaded.url) {
           mediaUrls.push(uploaded.url);
           console.log("[GHL] attachment uploaded:", uploaded.url);
@@ -792,18 +888,34 @@ const handleProviderSend = async (req, res) => {
             continue;
           }
 
-          const filename = attachment.name || attachment.filename || 'attachment';
+          let filename = attachment.name || attachment.filename || 'attachment';
           
           console.log("[provider] downloading attachment:", attachmentUrl);
           
           // Download from GHL
-          const buffer = await downloadGHLAttachment(attachmentUrl);
-          if (!buffer) {
+          const downloadResult = await downloadGHLAttachment(attachmentUrl);
+          if (!downloadResult || !downloadResult.buffer) {
             console.error("[provider] download failed for:", attachmentUrl);
             continue;
           }
 
-          console.log("[provider] downloaded", buffer.length, "bytes, uploading to BlueBubbles...");
+          const { buffer, mimeType } = downloadResult;
+          
+          // Add proper extension to filename based on MIME type
+          if (!filename.includes('.')) {
+            const extMap = {
+              'image/png': '.png',
+              'image/jpeg': '.jpg',
+              'image/gif': '.gif',
+              'image/webp': '.webp',
+              'application/pdf': '.pdf',
+              'video/mp4': '.mp4',
+              'video/quicktime': '.mov',
+            };
+            filename += (extMap[mimeType] || '');
+          }
+
+          console.log("[provider] downloaded", buffer.length, "bytes, MIME:", mimeType, "uploading to BlueBubbles...");
           
           // Upload to BlueBubbles
           const bbResult = await bbUploadAttachment(chatGuid, buffer, filename);
@@ -1185,7 +1297,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.28 - Attachments Fixed</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.29 - MIME Detection</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1214,7 +1326,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.28",
+    version: "2.29",
     mode: "full-bidirectional-attachments",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
@@ -1287,7 +1399,7 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.28 - Attachments Fixed! 📎📸💬`);
+    console.log(`[bridge] VERSION 2.29 - MIME Detection! Attachments work! 📎✨`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
