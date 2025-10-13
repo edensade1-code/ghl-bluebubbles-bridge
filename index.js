@@ -1,8 +1,8 @@
-// index.js - VERSION 2.27 (2025-10-12)
+// index.js - VERSION 2.28 (2025-10-12)
 // ============================================================================
 // PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
 // ============================================================================
-// LATEST UPDATE: Fixed outbound attachments! Now reads from request body!
+// LATEST UPDATE: Fixed attachment upload with tempGuid + improved echo prevention!
 // ============================================================================
 
 import express from "express";
@@ -92,6 +92,8 @@ const TOKENS_ENV_KEY = "GHL_TOKENS_BASE64";
 
 const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94718bcd02bcf453ccf46").trim();
 
+const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
+
 /* -------------------------------------------------------------------------- */
 /* State & Helper Functions                                                   */
 /* -------------------------------------------------------------------------- */
@@ -113,6 +115,7 @@ const rememberOutbound = (text, chatGuid) => {
   
   console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
   
+  // Clean up old entries
   if (recentOutboundMessages.size > 100) {
     const now = Date.now();
     for (const [k, exp] of recentOutboundMessages.entries()) {
@@ -129,7 +132,7 @@ const isOurOutbound = (text, chatGuid) => {
     recentOutboundMessages.delete(key);
     return false;
   }
-  console.log("[outbound-tracker] MATCH FOUND - this is our message");
+  console.log("[outbound-tracker] MATCH FOUND - ignoring echo");
   return true;
 };
 
@@ -314,6 +317,7 @@ const bbUploadAttachment = async (chatGuid, buffer, filename) => {
       contentType: 'application/octet-stream'
     });
     form.append('chatGuid', chatGuid);
+    form.append('tempGuid', newTempGuid('att'));
     form.append('name', filename || 'attachment');
 
     const url = `${BB_BASE}/api/v1/message/attachment?guid=${encodeURIComponent(BB_GUID)}`;
@@ -574,10 +578,12 @@ const pushToGhlThread = async ({
   
   if (isFromMe) {
     const date = timestamp ? new Date(timestamp) : new Date();
+    // Use configured timezone
     const timeStr = date.toLocaleTimeString('en-US', { 
       hour: 'numeric', 
       minute: '2-digit',
-      hour12: true 
+      hour12: true,
+      timeZone: TIMEZONE
     });
     
     messageBody = `━━━━━━━━━━━━━━━━━━━━
@@ -624,7 +630,8 @@ ${text || ''}`;
       const timeStr = date.toLocaleTimeString('en-US', { 
         hour: 'numeric', 
         minute: '2-digit',
-        hour12: true 
+        hour12: true,
+        timeZone: TIMEZONE
       });
       messageBody = `━━━━━━━━━━━━━━━━━━━━
 👤 YOU (sent from iPhone)
@@ -763,7 +770,11 @@ const handleProviderSend = async (req, res) => {
     
     const data = await bbPost("/api/v1/message/text", payload);
 
+    // Remember this message BEFORE sending attachments
+    rememberOutbound(String(message), chatGuid);
+
     // Process attachments from request body
+    let successfulAttachments = 0;
     if (attachmentsFromBody.length > 0) {
       console.log(`[provider] sending ${attachmentsFromBody.length} attachment(s) to BlueBubbles`);
       
@@ -797,6 +808,7 @@ const handleProviderSend = async (req, res) => {
           // Upload to BlueBubbles
           const bbResult = await bbUploadAttachment(chatGuid, buffer, filename);
           console.log("[provider] ✅ attachment sent to BlueBubbles:", bbResult?.guid || 'success');
+          successfulAttachments++;
         } catch (e) {
           console.error("[provider] failed to send attachment:", e.message);
         }
@@ -805,8 +817,6 @@ const handleProviderSend = async (req, res) => {
       console.log("[provider] no attachments found in request body");
     }
 
-    rememberOutbound(String(message), chatGuid);
-
     return res.status(200).json({
       ok: true,
       success: true,
@@ -814,7 +824,8 @@ const handleProviderSend = async (req, res) => {
       provider: "eden-imessage",
       relay: BB_BASE,
       id: data?.guid || data?.data?.guid || payload.tempGuid,
-      attachmentCount: attachmentsFromBody.length,
+      attachmentCount: successfulAttachments,
+      attachmentsRequested: attachmentsFromBody.length,
       data,
     });
   } catch (err) {
@@ -1174,7 +1185,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:16p
 .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
 button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
 <body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.27 - Outbound Attachments Fixed</div></header>
+<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.28 - Attachments Fixed</div></header>
 <div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
   <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
   <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
@@ -1203,7 +1214,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.27",
+    version: "2.28",
     mode: "full-bidirectional-attachments",
     relay: BB_BASE,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
@@ -1216,6 +1227,7 @@ app.get("/", (_req, res) => {
       photos: true,
       files: true,
       privacyFilter: true,
+      timezone: TIMEZONE,
     },
     messageFlow: {
       "contact→you": "Thread as iMessage with attachments",
@@ -1275,9 +1287,10 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.27 - Outbound Attachments Fixed! 📎📸💬`);
+    console.log(`[bridge] VERSION 2.28 - Attachments Fixed! 📎📸💬`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
+    console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Features:");
