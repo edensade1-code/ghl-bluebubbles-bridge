@@ -1,4 +1,4 @@
-// index.js - VERSION 3.1 (2025-10-25)
+// index.js - VERSION 3.0 (2025-10-25)
 // ============================================================================
 // PROJECT: Eden Bridge - BlueBubbles ↔ GHL + Chrome Extension Calling
 // ============================================================================
@@ -1434,6 +1434,11 @@ app.get("/calling", (req, res) => {
   const origin = req.query.origin || 'extension';
   
   console.log(`[calling] Request from ${origin} for ${phoneNumber}`);
+  
+  // Add no-cache headers to prevent browser from caching
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   
   res.send(`
     <!DOCTYPE html>
