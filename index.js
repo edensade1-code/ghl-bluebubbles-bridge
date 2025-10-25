@@ -1,4 +1,4 @@
-// index.js - VERSION 3.0 (2025-10-25)
+// index.js - VERSION 3.1 (2025-10-25)
 // ============================================================================
 // PROJECT: Eden Bridge - BlueBubbles ↔ GHL + Chrome Extension Calling
 // ============================================================================
@@ -1588,12 +1588,40 @@ app.get("/calling", (req, res) => {
         const statusEl = document.getElementById('status');
         const callBtn = document.getElementById('callBtn');
         
+        // Normalize phone number - add +1 if missing
+        function normalizePhone(phone) {
+          // Remove all non-digit characters except +
+          let clean = phone.replace(/[^0-9+]/g, '');
+          
+          // If it starts with +, keep it
+          if (clean.startsWith('+')) {
+            return clean;
+          }
+          
+          // If it's 11 digits starting with 1, add +
+          if (clean.length === 11 && clean.startsWith('1')) {
+            return '+' + clean;
+          }
+          
+          // If it's 10 digits, add +1
+          if (clean.length === 10) {
+            return '+1' + clean;
+          }
+          
+          // Otherwise return as-is
+          return clean;
+        }
+        
         function makeCall() {
           statusEl.textContent = 'Opening phone app...';
           callBtn.disabled = true;
           
+          // Normalize the phone number
+          const normalizedPhone = normalizePhone(phoneNumber);
+          console.log('Calling:', normalizedPhone);
+          
           // Trigger tel: URL (opens FaceTime/Phone app)
-          window.location.href = 'tel:' + phoneNumber;
+          window.location.href = 'tel:' + normalizedPhone;
           
           // Log call attempt
           fetch('/call-initiated', {
