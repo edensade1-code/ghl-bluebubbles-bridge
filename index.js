@@ -1,8 +1,8 @@
-// index.js - VERSION 2.30 (2025-10-12)
+// index.js - VERSION 3.0 (2025-10-25)
 // ============================================================================
-// PROJECT: Eden iMessage Bridge - BlueBubbles ↔ GoHighLevel (GHL) Integration
+// PROJECT: Eden Bridge - BlueBubbles ↔ GHL + Chrome Extension Calling
 // ============================================================================
-// LATEST UPDATE: Perfect attachment echo prevention! No more duplicate images!
+// LATEST UPDATE: Added click-to-call endpoints for Chrome extension integration!
 // ============================================================================
 
 import express from "express";
@@ -1421,6 +1421,353 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Chrome Extension Calling Integration                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * GET /calling
+ * Click-to-call interface for Chrome extension
+ * Opens when user clicks call button in GHL/CRM
+ */
+app.get("/calling", (req, res) => {
+  const phoneNumber = req.query.id || '';
+  const origin = req.query.origin || 'extension';
+  
+  console.log(`[calling] Request from ${origin} for ${phoneNumber}`);
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Call ${phoneNumber}</title>
+      <style>
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+        
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          padding: 20px;
+        }
+        
+        .container {
+          background: white;
+          padding: 40px;
+          border-radius: 20px;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          text-align: center;
+          max-width: 400px;
+          width: 100%;
+          animation: slideUp 0.3s ease-out;
+        }
+        
+        @keyframes slideUp {
+          from {
+            opacity: 0;
+            transform: translateY(20px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        
+        h1 {
+          color: #333;
+          margin-bottom: 10px;
+          font-size: 28px;
+        }
+        
+        .phone {
+          font-size: 32px;
+          font-weight: bold;
+          color: #008bff;
+          margin: 30px 0;
+          letter-spacing: 1px;
+        }
+        
+        .status {
+          font-size: 16px;
+          color: #666;
+          margin: 20px 0;
+          min-height: 24px;
+          transition: color 0.3s ease;
+        }
+        
+        .status.success {
+          color: #2ecc40;
+        }
+        
+        .buttons {
+          display: flex;
+          gap: 10px;
+          margin-top: 30px;
+        }
+        
+        button {
+          flex: 1;
+          background: #008bff;
+          color: white;
+          border: none;
+          padding: 15px 20px;
+          font-size: 16px;
+          font-weight: 600;
+          border-radius: 10px;
+          cursor: pointer;
+          transition: all 0.3s ease;
+        }
+        
+        button:hover {
+          background: #0066cc;
+          transform: translateY(-2px);
+          box-shadow: 0 5px 15px rgba(0,139,255,0.3);
+        }
+        
+        button:active {
+          transform: translateY(0);
+        }
+        
+        button:disabled {
+          background: #ccc;
+          cursor: not-allowed;
+          transform: none;
+        }
+        
+        button.cancel {
+          background: #e0e0e0;
+          color: #333;
+        }
+        
+        button.cancel:hover {
+          background: #d0d0d0;
+          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .icon {
+          font-size: 48px;
+          margin-bottom: 20px;
+          animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.1); }
+        }
+        
+        .powered-by {
+          margin-top: 30px;
+          font-size: 12px;
+          color: #999;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon">📞</div>
+        <h1>Click to Call</h1>
+        <div class="phone" id="phoneDisplay">${phoneNumber}</div>
+        <div class="status" id="status">Ready to call</div>
+        <div class="buttons">
+          <button id="callBtn" onclick="makeCall()">Call Now</button>
+          <button class="cancel" onclick="window.close()">Cancel</button>
+        </div>
+        <div class="powered-by">Powered by Eden Bridge</div>
+      </div>
+      
+      <script>
+        const phoneNumber = "${phoneNumber}";
+        const statusEl = document.getElementById('status');
+        const callBtn = document.getElementById('callBtn');
+        
+        function makeCall() {
+          statusEl.textContent = 'Opening phone app...';
+          callBtn.disabled = true;
+          
+          // Trigger tel: URL (opens FaceTime/Phone app)
+          window.location.href = 'tel:' + phoneNumber;
+          
+          // Log call attempt
+          fetch('/call-initiated', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              phoneNumber: phoneNumber,
+              origin: '${origin}',
+              timestamp: new Date().toISOString()
+            })
+          }).catch(err => console.log('Log failed:', err));
+          
+          // Update status
+          setTimeout(() => {
+            statusEl.textContent = 'Call initiated! You can close this window.';
+            statusEl.className = 'status success';
+          }, 1000);
+        }
+        
+        // Optional: Auto-call after 2 seconds (uncomment to enable)
+        // setTimeout(makeCall, 2000);
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+/**
+ * GET /conversations
+ * Click-to-chat interface for Chrome extension
+ * Opens when user clicks chat button in GHL/CRM
+ */
+app.get("/conversations", (req, res) => {
+  const phoneNumber = req.query.id || '';
+  const origin = req.query.origin || 'extension';
+  
+  console.log(`[conversations] Request from ${origin} for ${phoneNumber}`);
+  
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Chat ${phoneNumber}</title>
+      <style>
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+        
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          padding: 20px;
+        }
+        
+        .container {
+          background: white;
+          padding: 40px;
+          border-radius: 20px;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          text-align: center;
+          max-width: 400px;
+          width: 100%;
+        }
+        
+        h1 {
+          color: #333;
+          margin-bottom: 10px;
+          font-size: 28px;
+        }
+        
+        .phone {
+          font-size: 24px;
+          font-weight: bold;
+          color: #008bff;
+          margin: 20px 0;
+        }
+        
+        .icon {
+          font-size: 48px;
+          margin-bottom: 20px;
+        }
+        
+        p {
+          color: #666;
+          margin: 20px 0;
+        }
+        
+        button {
+          background: #008bff;
+          color: white;
+          border: none;
+          padding: 15px 30px;
+          font-size: 16px;
+          font-weight: 600;
+          border-radius: 10px;
+          cursor: pointer;
+          margin-top: 20px;
+        }
+        
+        button:hover {
+          background: #0066cc;
+        }
+        
+        .powered-by {
+          margin-top: 30px;
+          font-size: 12px;
+          color: #999;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon">💬</div>
+        <h1>Chat</h1>
+        <div class="phone">${phoneNumber}</div>
+        <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
+        <button onclick="window.close()">Close</button>
+        <div class="powered-by">Powered by Eden Bridge</div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+/**
+ * POST /call-initiated
+ * Logs call attempts from Chrome extension
+ */
+app.post("/call-initiated", async (req, res) => {
+  try {
+    const { phoneNumber, origin, timestamp } = req.body;
+    console.log(`[call-initiated] ${phoneNumber} from ${origin} at ${timestamp}`);
+    
+    // Optional: Log to GHL activity
+    // Uncomment and implement if you want to track calls in GHL
+    /*
+    const any = getAnyLocation();
+    if (any) {
+      const { locationId } = any;
+      const contactId = await findContactIdByPhone(locationId, ensureE164(phoneNumber));
+      
+      if (contactId) {
+        await withLcCall(locationId, async (token) => {
+          await axios.post(
+            \`\${LC_API}/contacts/\${contactId}/notes\`,
+            {
+              body: \`📞 Call initiated via Chrome extension to \${phoneNumber}\`,
+            },
+            {
+              headers: lcHeaders(token),
+              timeout: 10000
+            }
+          );
+        });
+      }
+    }
+    */
+    
+    res.json({ ok: true, logged: true, timestamp });
+  } catch (error) {
+    console.error("[call-initiated] error:", error.message);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* Server Startup                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -1429,7 +1776,7 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 2.30 - COMPLETE! All Features Working! 🎉✨`);
+    console.log(`[bridge] VERSION 3.0 - Chrome Extension Calling Added! 🎉✨`);
     console.log(`[bridge] BB_BASE = ${BB_BASE}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
@@ -1441,6 +1788,8 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
     console.log("  ✅ Files & documents (all directions)");
     console.log("  ✅ GHL → Contact WITH attachments (reads from request body)!");
     console.log("  ✅ Privacy filter (no auto-contact creation)");
+    console.log("  ✅ Click-to-call (Chrome extension integration)");
+    console.log("  ✅ Click-to-chat (Chrome extension integration)");
     console.log("");
     console.log("📋 Message Flow:");
     console.log("  • Contact → You: Thread as iMessage with attachments");
