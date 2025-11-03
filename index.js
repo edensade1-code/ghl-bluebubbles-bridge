@@ -1,10 +1,13 @@
-// index.js - VERSION 3.5.1 (2025-11-02)
+// index.js - VERSION 3.6 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.5.1:
-// - Added debug logging to see what password is being used
-// - Shows password length and first 10 chars for debugging
+// CHANGELOG v3.6:
+// - FIXED: Separate webhook endpoints for each BlueBubbles server
+// - bb1 webhooks to: /webhook/bluebubbles/bb1
+// - bb2 webhooks to: /webhook/bluebubbles/bb2
+// - Prevents duplicate messages and incorrect "YOU (iPhone)" labels
+// - Each server knows exactly which parking number to use
 // ============================================================================
 
 import express from "express";
@@ -1174,7 +1177,8 @@ app.post("/send", handleProviderSend);
 /* Inbound Webhook - BlueBubbles → Bridge → GHL (Multi-Server)               */
 /* -------------------------------------------------------------------------- */
 
-app.post("/webhook/bluebubbles", async (req, res) => {
+// Generic webhook handler function
+async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
   try {
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
@@ -1235,6 +1239,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       timestamp,
       hasAttachments,
       attachmentCount: attachments?.length || 0,
+      serverOverride: serverOverride ? `${serverOverride.name} (forced)` : 'auto-detect',
     });
 
     if (!messageText && !hasAttachments && !attachments?.length) {
@@ -1270,8 +1275,9 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
-    // Find which server this message came from based on the contact's phone number
-    const server = findServerForPhone(contactE164);
+    // NEW v3.6: Use the server that was passed in (from specific webhook endpoint)
+    // or fall back to auto-detection
+    const server = serverOverride || findServerForPhone(contactE164);
     console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
     // Get the parking number for this specific server/iMessage number
@@ -1380,6 +1386,23 @@ app.post("/webhook/bluebubbles", async (req, res) => {
     console.error("[inbound] EXCEPTION:", err?.response?.data || err.message, err.stack);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
+}
+
+// NEW v3.6: Specific webhook endpoints for each server
+app.post("/webhook/bluebubbles/bb1", async (req, res) => {
+  console.log("[webhook] bb1 (Eden's Mac) endpoint called");
+  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[0]); // Force bb1
+});
+
+app.post("/webhook/bluebubbles/bb2", async (req, res) => {
+  console.log("[webhook] bb2 (Mario's Mac Mini) endpoint called");
+  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[1]); // Force bb2
+});
+
+// Generic endpoint - auto-detects server (fallback)
+app.post("/webhook/bluebubbles", async (req, res) => {
+  console.log("[webhook] generic endpoint called, auto-detecting server...");
+  return handleBlueBubblesWebhook(req, res, null);
 });
 
 // Legacy webhook endpoint - redirects to new endpoint
@@ -1959,7 +1982,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.5 - Routes by GHL userId! 🎉✨`);
+    console.log(`[bridge] VERSION 3.6 - Separate Webhook Endpoints! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -1967,6 +1990,7 @@ app.post("/call-initiated", async (req, res) => {
       console.log(`    URL: ${server.baseUrl}`);
       console.log(`    Parking Number: ${server.parkingNumber} (from env)`);
       console.log(`    iMessage Numbers: ${server.phoneNumbers.length > 0 ? server.phoneNumbers.join(', ') : 'none configured yet'}`);
+      console.log(`    Webhook URL: https://ieden-bluebubbles-bridge-1.onrender.com/webhook/bluebubbles/${server.id}`);
       console.log("");
     }
     console.log(`[bridge] Total iMessage Numbers: ${getAllPhoneNumbers().length}`);
