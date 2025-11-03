@@ -1,8 +1,12 @@
-// index.js - VERSION 3.1 (2025-11-02)
+// index.js - VERSION 3.3 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// NEW: Support for multiple BlueBubbles servers with user assignment!
+// CHANGELOG v3.3:
+// - Added environment variables for parking numbers per server/user
+// - PARKING_NUMBER_EDEN and PARKING_NUMBER_MARIO env vars
+// - Makes it easy to update parking numbers without changing code
+// - Falls back to hardcoded defaults if env vars not set
 // ============================================================================
 
 import express from "express";
@@ -63,47 +67,59 @@ app.use(
 app.use(morgan("tiny"));
 
 /* -------------------------------------------------------------------------- */
-/* Config - BlueBubbles Servers                                               */
+/* Config - Environment Variables for Parking Numbers                         */
+/* -------------------------------------------------------------------------- */
+const PARKING_NUMBER_EDEN = (process.env.PARKING_NUMBER_EDEN || "+17867334163").trim();
+const PARKING_NUMBER_MARIO = (process.env.PARKING_NUMBER_MARIO || "+17868828328").trim();
+
+/* -------------------------------------------------------------------------- */
+/* Config - BlueBubbles Servers with Parking Numbers from Env Vars            */
 /* -------------------------------------------------------------------------- */
 // Define your BlueBubbles servers here
-// Each server can handle multiple phone numbers
+// Each server can handle multiple phone numbers and has its own parking number
 const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
     name: "Server 1 (Original Mac - Eden)",
     baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
+    parkingNumber: PARKING_NUMBER_EDEN, // From env var PARKING_NUMBER_EDEN
     // iMessage phone numbers handled by this server
     phoneNumbers: [
       "+13058337256", // Eden's iMessage number
     ],
+    ghlUser: "Eden",
   },
   {
     id: "bb2",
     name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025!",
+    parkingNumber: PARKING_NUMBER_MARIO, // From env var PARKING_NUMBER_MARIO
     // iMessage phone numbers handled by this server
     phoneNumbers: [
       "+13059273268", // Mario's iMessage number
     ],
+    ghlUser: "Mario",
   },
 ];
 
-// Map GHL forwarding numbers to iMessage numbers
-// This handles the case where GHL uses different numbers than iMessage
-// Format: { "ghlForwardingNumber": "iMessageNumber" }
-const GHL_TO_IMESSAGE_MAP = {
-  "+17867334163": "+13058337256", // Eden's GHL number → Eden's iMessage
-  "+17868828328": "+13059273268", // Mario's GHL number → Mario's iMessage
-};
+// Build GHL parking numbers to iMessage numbers map dynamically
+// This handles the routing from GHL parking number → iMessage number
+const GHL_TO_IMESSAGE_MAP = {};
+for (const server of BLUEBUBBLES_SERVERS) {
+  for (const phoneNumber of server.phoneNumbers) {
+    GHL_TO_IMESSAGE_MAP[server.parkingNumber] = phoneNumber;
+  }
+}
 
-// Map phone numbers to GHL users (optional - GHL handles this)
-// Format: { "phoneNumber": "ghlUserId" }
-const PHONE_TO_USER_MAP = {
-  "+13058337256": "eden",  // Eden's iMessage number
-  "+13059273268": "mario", // Mario's iMessage number
-};
+// Build reverse map: iMessage number to parking number (for inbound messages)
+const IMESSAGE_TO_GHL_MAP = {};
+for (const server of BLUEBUBBLES_SERVERS) {
+  for (const phoneNumber of server.phoneNumbers) {
+    IMESSAGE_TO_GHL_MAP[phoneNumber] = server.parkingNumber;
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Config - Environment Variables                                             */
@@ -124,9 +140,6 @@ const OAUTH_TOKEN_BASE     = "https://services.leadconnectorhq.com/oauth";
 
 const GHL_SHARED_SECRET = (process.env.GHL_SHARED_SECRET || "").trim();
 
-const ENV_PARKING_NUMBER =
-  (process.env.PARKING_NUMBER || process.env.BUSINESS_NUMBER || "").trim();
-
 const TOKENS_FILE = (process.env.TOKENS_FILE || "./tokens.json").trim();
 const TOKENS_ENV_KEY = "GHL_TOKENS_BASE64";
 
@@ -138,15 +151,15 @@ const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 /* BlueBubbles Server Routing                                                 */
 /* -------------------------------------------------------------------------- */
 
-// Resolve GHL forwarding number to actual iMessage number
+// Resolve GHL parking number to actual iMessage number
 function resolveToIMessageNumber(phoneE164) {
   // First normalize the phone number (remove any formatting)
   const normalized = toE164US(phoneE164);
   
-  // Check if this is a GHL forwarding number that maps to an iMessage number
+  // Check if this is a GHL parking number that maps to an iMessage number
   if (GHL_TO_IMESSAGE_MAP[normalized]) {
     const iMessageNumber = GHL_TO_IMESSAGE_MAP[normalized];
-    console.log(`[routing] GHL number ${normalized} mapped to iMessage ${iMessageNumber}`);
+    console.log(`[routing] GHL parking ${normalized} mapped to iMessage ${iMessageNumber}`);
     return iMessageNumber;
   }
   
@@ -156,7 +169,7 @@ function resolveToIMessageNumber(phoneE164) {
 
 // Find which BlueBubbles server handles a given phone number
 function findServerForPhone(phoneE164) {
-  // First resolve any GHL forwarding numbers to iMessage numbers
+  // First resolve any GHL parking numbers to iMessage numbers
   const iMessageNumber = resolveToIMessageNumber(phoneE164);
   
   for (const server of BLUEBUBBLES_SERVERS) {
@@ -171,6 +184,19 @@ function findServerForPhone(phoneE164) {
   return BLUEBUBBLES_SERVERS[0];
 }
 
+// Get parking number for a specific iMessage number (for inbound messages)
+function getParkingNumberForIMessage(iMessageE164) {
+  const parkingNumber = IMESSAGE_TO_GHL_MAP[iMessageE164];
+  if (parkingNumber) {
+    console.log(`[routing] iMessage ${iMessageE164} uses parking number ${parkingNumber}`);
+    return parkingNumber;
+  }
+  
+  // Fallback to first server's parking number
+  console.log(`[routing] No parking number mapped for ${iMessageE164}, using default`);
+  return BLUEBUBBLES_SERVERS[0].parkingNumber;
+}
+
 // Get all active phone numbers from all servers
 function getAllPhoneNumbers() {
   const allNumbers = [];
@@ -180,9 +206,9 @@ function getAllPhoneNumbers() {
   return allNumbers;
 }
 
-// Get GHL user ID for a phone number
-function getUserForPhone(phoneE164) {
-  return PHONE_TO_USER_MAP[phoneE164] || "default";
+// Get all parking numbers
+function getAllParkingNumbers() {
+  return BLUEBUBBLES_SERVERS.map(s => s.parkingNumber);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -344,13 +370,13 @@ for (const server of BLUEBUBBLES_SERVERS) {
   if (!server.password || server.password.includes("REPLACE_WITH")) {
     console.warn(`[WARN] ${server.name} password not set properly!`);
   }
+  if (!server.parkingNumber) {
+    console.warn(`[WARN] ${server.name} parking number not configured!`);
+  }
 }
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
-}
-if (!ENV_PARKING_NUMBER) {
-  console.log("[bridge] PARKING_NUMBER/BUSINESS_NUMBER not set — GHL will reject inbound.");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -377,15 +403,6 @@ const ensureE164 = (phone) => {
 };
 
 const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
-
-function getIdentityNumber() {
-  try {
-    return ENV_PARKING_NUMBER ? ensureE164(ENV_PARKING_NUMBER) : null;
-  } catch (err) {
-    console.error("[identity] invalid PARKING_NUMBER format:", err.message);
-    return null;
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* BlueBubbles API Helpers (Multi-Server)                                     */
@@ -1160,15 +1177,18 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
-    // Find which server this message came from
+    // Find which server this message came from based on the contact's phone number
     const server = findServerForPhone(contactE164);
-    console.log(`[inbound] message from ${server.name} for ${contactE164}`);
+    console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
-    const locationNumber = getIdentityNumber();
+    // Get the parking number for this specific server/iMessage number
+    const locationNumber = server.parkingNumber;
     if (!locationNumber) {
-      console.error("[inbound] PARKING_NUMBER NOT SET OR INVALID");
-      return res.status(200).json({ ok: true, note: "no-identity-number" });
+      console.error(`[inbound] PARKING NUMBER NOT SET for ${server.name}`);
+      return res.status(200).json({ ok: true, note: "no-parking-number" });
     }
+
+    console.log(`[inbound] using parking number ${locationNumber} for ${server.name}`);
 
     const key = dedupeKey({ text: messageText, from: contactE164, chatGuid });
     if (isRecentInbound(key)) {
@@ -1186,6 +1206,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
         messagePreview: messageText?.slice(0, 30),
         hasAttachments,
         server: server.name,
+        parkingNumber: locationNumber,
       });
       return res.status(200).json({ ok: true, dropped: "no-contact", reason: "privacy-filter" });
     }
@@ -1197,9 +1218,9 @@ app.post("/webhook/bluebubbles", async (req, res) => {
     }
 
     if (isFromMe) {
-      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name}`);
+      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name} (parking: ${locationNumber})`);
     } else {
-      console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name}`);
+      console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name} (parking: ${locationNumber})`);
     }
     
     const pushed = await pushToGhlThread({
@@ -1219,7 +1240,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''} via ${server.name}`);
+    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''} via ${server.name} (parking: ${locationNumber})`);
 
     rememberPush({
       locationId,
@@ -1233,6 +1254,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       attachmentCount: attachments?.length || 0,
       handledAs: "conversation-thread-imessage",
       server: server.name,
+      parkingNumber: locationNumber,
     });
 
     if (GHL_INBOUND_URL) {
@@ -1251,6 +1273,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
             handledAs: "conversation-thread-imessage",
             receivedAt: new Date().toISOString(),
             server: server.name,
+            parkingNumber: locationNumber,
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
         );
@@ -1259,7 +1282,7 @@ app.post("/webhook/bluebubbles", async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, pushed, server: server.name });
+    return res.status(200).json({ ok: true, pushed, server: server.name, parkingNumber: locationNumber });
   } catch (err) {
     console.error("[inbound] EXCEPTION:", err?.response?.data || err.message, err.stack);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
@@ -1367,12 +1390,15 @@ app.get("/oauth/debug", (_req, res) => {
     ok: true,
     locationsWithTokens: Array.from(tokenStore.keys()),
     tokensFile: TOKENS_FILE,
-    parkingNumber: ENV_PARKING_NUMBER || null,
+    parkingNumbers: getAllParkingNumbers(),
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
       baseUrl: s.baseUrl,
+      parkingNumber: s.parkingNumber,
+      ghlUser: s.ghlUser,
       phoneCount: s.phoneNumbers.length,
+      phoneNumbers: s.phoneNumbers,
     })),
   });
 });
@@ -1385,21 +1411,25 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.1",
-    mode: "multi-server-support",
+    version: "3.3",
+    mode: "multi-server-with-env-parking-numbers",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
       baseUrl: s.baseUrl,
+      parkingNumber: s.parkingNumber,
+      ghlUser: s.ghlUser,
       phoneNumbers: s.phoneNumbers,
     })),
     totalPhoneNumbers: getAllPhoneNumbers().length,
+    totalParkingNumbers: getAllParkingNumbers().length,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
-    parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     features: {
       multiServer: true,
       userAssignment: true,
+      dedicatedParkingNumbers: true,
+      envConfigurableParkingNumbers: true,
       textMessages: true,
       inboundAttachments: true,
       outboundAttachments: true,
@@ -1414,6 +1444,20 @@ app.get("/", (_req, res) => {
       "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS (routed to correct server)",
       "non-contact": "IGNORED (privacy filter)",
     },
+    routing: {
+      "Eden": {
+        parkingNumber: PARKING_NUMBER_EDEN,
+        iMessageNumber: "+13058337256",
+        server: "bb1 (Original Mac)",
+        envVar: "PARKING_NUMBER_EDEN"
+      },
+      "Mario": {
+        parkingNumber: PARKING_NUMBER_MARIO,
+        iMessageNumber: "+13059273268",
+        server: "bb2 (Mac Mini)",
+        envVar: "PARKING_NUMBER_MARIO"
+      }
+    }
   });
 });
 
@@ -1430,6 +1474,8 @@ app.get("/health", async (_req, res) => {
         id: server.id,
         name: server.name,
         baseUrl: server.baseUrl,
+        parkingNumber: server.parkingNumber,
+        ghlUser: server.ghlUser,
         status: "online",
         ping: pong.data ?? null,
       });
@@ -1438,6 +1484,8 @@ app.get("/health", async (_req, res) => {
         id: server.id,
         name: server.name,
         baseUrl: server.baseUrl,
+        parkingNumber: server.parkingNumber,
+        ghlUser: server.ghlUser,
         status: "offline",
         error: e?.response?.data ?? e?.message ?? "Ping failed",
       });
@@ -1639,7 +1687,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.1</div>
+        <div class="powered-by">Powered by Eden Bridge v3.3</div>
       </div>
       
       <script>
@@ -1788,7 +1836,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.1</div>
+        <div class="powered-by">Powered by Eden Bridge v3.3</div>
       </div>
     </body>
     </html>
@@ -1816,22 +1864,30 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.1 - Multi-Server Support! 🎉✨`);
+    console.log(`[bridge] VERSION 3.3 - Multi-Server with ENV Parking Numbers! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
-      console.log(`  • ${server.name} (${server.id})`);
+      console.log(`  • ${server.name} (${server.id}) - ${server.ghlUser}`);
       console.log(`    URL: ${server.baseUrl}`);
-      console.log(`    Phone Numbers: ${server.phoneNumbers.length > 0 ? server.phoneNumbers.join(', ') : 'none configured yet'}`);
+      console.log(`    Parking Number: ${server.parkingNumber} (from env)`);
+      console.log(`    iMessage Numbers: ${server.phoneNumbers.length > 0 ? server.phoneNumbers.join(', ') : 'none configured yet'}`);
+      console.log("");
     }
-    console.log("");
-    console.log(`[bridge] Total Phone Numbers: ${getAllPhoneNumbers().length}`);
-    console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
+    console.log(`[bridge] Total iMessage Numbers: ${getAllPhoneNumbers().length}`);
+    console.log(`[bridge] Total Parking Numbers: ${getAllParkingNumbers().length}`);
     console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
+    console.log("📋 Routing Configuration:");
+    console.log(`  Eden (env: PARKING_NUMBER_EDEN):`);
+    console.log(`    Parking: ${PARKING_NUMBER_EDEN} → iMessage: +13058337256 → Server: bb1`);
+    console.log(`  Mario (env: PARKING_NUMBER_MARIO):`);
+    console.log(`    Parking: ${PARKING_NUMBER_MARIO} → iMessage: +13059273268 → Server: bb2`);
+    console.log("");
     console.log("📋 Features:");
     console.log("  ✅ Multiple BlueBubbles servers");
+    console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
     console.log("  ✅ Photos & images (all directions)");
