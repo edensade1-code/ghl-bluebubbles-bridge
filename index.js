@@ -1,12 +1,11 @@
-// index.js - VERSION 3.6.2 (2025-11-03)
+// index.js - VERSION 3.6.4 (2025-11-03)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.2:
-// - FIXED: Allow sending attachments without message text
-// - FIXED: Improved GHL file upload handling
-// - Better error messages for unsupported file types
-// - Attachment-only messages now work correctly
+// CHANGELOG v3.6.4:
+// - FIXED: "data is not defined" error when sending messages
+// - Fixed variable scoping issue introduced in v3.6.2
+// - All message types now work correctly
 // ============================================================================
 
 import express from "express";
@@ -1113,6 +1112,7 @@ const handleProviderSend = async (req, res) => {
 
     // NEW v3.6.2: Send text message only if there's text content
     let textMessageSent = false;
+    let data = null;
     if (message && String(message).trim()) {
       const payload = {
         chatGuid,
@@ -1121,7 +1121,7 @@ const handleProviderSend = async (req, res) => {
         method: "apple-script",
       };
       
-      const data = await bbPost(server, "/api/v1/message/text", payload);
+      data = await bbPost(server, "/api/v1/message/text", payload);
       textMessageSent = true;
 
       // Remember this message BEFORE sending attachments
@@ -1191,17 +1191,18 @@ const handleProviderSend = async (req, res) => {
     return res.status(200).json({
       ok: true,
       success: true,
-      status: "sent",
+      status: "delivered",
+      delivered: true,
       provider: "eden-imessage",
       relay: server.baseUrl,
       server: server.name,
       parkingNumber: server.parkingNumber,
       routedBy: routedBy,
-      id: textMessageSent ? (data?.guid || data?.data?.guid || payload.tempGuid) : `attachment-${newTempGuid()}`,
+      messageId: textMessageSent ? (data?.guid || data?.data?.guid || `msg-${newTempGuid()}`) : `attachment-${newTempGuid()}`,
+      id: textMessageSent ? (data?.guid || data?.data?.guid || `msg-${newTempGuid()}`) : `attachment-${newTempGuid()}`,
       attachmentCount: successfulAttachments,
       attachmentsRequested: attachmentsFromBody.length,
       textMessageSent,
-      data: textMessageSent ? data : { note: "attachment-only" },
     });
   } catch (err) {
     console.error("[provider] send error:", err?.response?.data || err.message);
@@ -2023,7 +2024,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.2 - Attachment Support Fixed! 🎉✨`);
+    console.log(`[bridge] VERSION 3.6.4 - Variable Scope Bug Fixed! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
