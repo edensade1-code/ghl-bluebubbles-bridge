@@ -70,34 +70,39 @@ app.use(morgan("tiny"));
 const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
-    name: "Server 1 (Original Mac)",
+    name: "Server 1 (Original Mac - Eden)",
     baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
-    // Phone numbers handled by this server
+    // iMessage phone numbers handled by this server
     phoneNumbers: [
-      // Add your first server's phone numbers here
-      // "+13051234567",
+      "+13058337256", // Eden's iMessage number
     ],
   },
   {
     id: "bb2",
-    name: "Server 2 (Mac Mini)",
+    name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025!",
-    // Phone numbers handled by this server
+    // iMessage phone numbers handled by this server
     phoneNumbers: [
-      "+13059273268", // The number we just set up
+      "+13059273268", // Mario's iMessage number
     ],
   },
 ];
 
-// Map phone numbers to GHL users
+// Map GHL forwarding numbers to iMessage numbers
+// This handles the case where GHL uses different numbers than iMessage
+// Format: { "ghlForwardingNumber": "iMessageNumber" }
+const GHL_TO_IMESSAGE_MAP = {
+  "+17867334163": "+13058337256", // Eden's GHL number → Eden's iMessage
+  "+17868828328": "+13059273268", // Mario's GHL number → Mario's iMessage
+};
+
+// Map phone numbers to GHL users (optional - GHL handles this)
 // Format: { "phoneNumber": "ghlUserId" }
 const PHONE_TO_USER_MAP = {
-  "+13059273268": "default", // Will be updated when you have GHL user IDs
-  // Add more mappings as you add numbers
-  // "+13051234567": "user_abc123",
-  // "+13059876543": "user_xyz789",
+  "+13058337256": "eden",  // Eden's iMessage number
+  "+13059273268": "mario", // Mario's iMessage number
 };
 
 /* -------------------------------------------------------------------------- */
@@ -133,14 +138,36 @@ const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 /* BlueBubbles Server Routing                                                 */
 /* -------------------------------------------------------------------------- */
 
+// Resolve GHL forwarding number to actual iMessage number
+function resolveToIMessageNumber(phoneE164) {
+  // First normalize the phone number (remove any formatting)
+  const normalized = toE164US(phoneE164);
+  
+  // Check if this is a GHL forwarding number that maps to an iMessage number
+  if (GHL_TO_IMESSAGE_MAP[normalized]) {
+    const iMessageNumber = GHL_TO_IMESSAGE_MAP[normalized];
+    console.log(`[routing] GHL number ${normalized} mapped to iMessage ${iMessageNumber}`);
+    return iMessageNumber;
+  }
+  
+  // Otherwise return the original number
+  return normalized;
+}
+
 // Find which BlueBubbles server handles a given phone number
 function findServerForPhone(phoneE164) {
+  // First resolve any GHL forwarding numbers to iMessage numbers
+  const iMessageNumber = resolveToIMessageNumber(phoneE164);
+  
   for (const server of BLUEBUBBLES_SERVERS) {
-    if (server.phoneNumbers.includes(phoneE164)) {
+    if (server.phoneNumbers.includes(iMessageNumber)) {
+      console.log(`[routing] ${phoneE164} → ${iMessageNumber} → ${server.name}`);
       return server;
     }
   }
+  
   // Default to first server if not found
+  console.log(`[routing] No match found for ${phoneE164}, using default server`);
   return BLUEBUBBLES_SERVERS[0];
 }
 
