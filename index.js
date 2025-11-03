@@ -1,12 +1,13 @@
-// index.js - VERSION 3.3 (2025-11-02)
+// index.js - VERSION 3.4 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.3:
-// - Added environment variables for parking numbers per server/user
-// - PARKING_NUMBER_EDEN and PARKING_NUMBER_MARIO env vars
-// - Makes it easy to update parking numbers without changing code
-// - Falls back to hardcoded defaults if env vars not set
+// CHANGELOG v3.4:
+// - FIXED: Now reads 'from' field in GHL requests to determine routing
+// - FIXED: Single conversation provider can now handle multiple users/servers
+// - Works like SendBlue/Linqblue - one provider, multiple numbers
+// - Automatically routes based on parking number in 'from' field
+// - Enhanced logging to show what 'from' number GHL is sending
 // ============================================================================
 
 import express from "express";
@@ -121,6 +122,12 @@ for (const server of BLUEBUBBLES_SERVERS) {
   }
 }
 
+// Build parking number to server map for quick lookup
+const PARKING_TO_SERVER_MAP = {};
+for (const server of BLUEBUBBLES_SERVERS) {
+  PARKING_TO_SERVER_MAP[server.parkingNumber] = server;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Config - Environment Variables                                             */
 /* -------------------------------------------------------------------------- */
@@ -150,6 +157,20 @@ const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 /* -------------------------------------------------------------------------- */
 /* BlueBubbles Server Routing                                                 */
 /* -------------------------------------------------------------------------- */
+
+// NEW: Find server by parking number (from GHL 'from' field)
+function findServerByParkingNumber(parkingE164) {
+  const normalized = toE164US(parkingE164);
+  const server = PARKING_TO_SERVER_MAP[normalized];
+  
+  if (server) {
+    console.log(`[routing] Parking ${normalized} → ${server.name} (${server.ghlUser})`);
+    return server;
+  }
+  
+  console.log(`[routing] No server found for parking ${normalized}, using default`);
+  return BLUEBUBBLES_SERVERS[0];
+}
 
 // Resolve GHL parking number to actual iMessage number
 function resolveToIMessageNumber(phoneE164) {
@@ -912,13 +933,14 @@ ${text || ''}`;
 /* Provider Send (Delivery URL) - GHL → iMessage WITH ATTACHMENTS           */
 /* -------------------------------------------------------------------------- */
 
-function extractToAndMessage(rawBody = {}) {
+function extractToFromAndMessage(rawBody = {}) {
   let body = rawBody;
   if (typeof body === "string") {
     try { body = JSON.parse(body); } catch { body = {}; }
   }
   if (!body || typeof body !== "object") body = {};
 
+  // Extract 'to' field
   const to =
     body.to ||
     body.toNumber ||
@@ -929,6 +951,15 @@ function extractToAndMessage(rawBody = {}) {
     body.destination ||
     null;
 
+  // NEW v3.4: Extract 'from' field (parking number from GHL)
+  const from =
+    body.from ||
+    body.fromNumber ||
+    body.sender?.phone ||
+    body.source ||
+    body.parkingNumber ||
+    null;
+
   const message =
     body.message ||
     body.text ||
@@ -936,7 +967,7 @@ function extractToAndMessage(rawBody = {}) {
     body.content ||
     null;
 
-  return { to, message, body };
+  return { to, from, message, body };
 }
 
 const handleProviderSend = async (req, res) => {
@@ -945,8 +976,9 @@ const handleProviderSend = async (req, res) => {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
 
-    const { to: toRaw, message: messageRaw, body: parsedBody } = extractToAndMessage(req.body || {});
+    const { to: toRaw, from: fromRaw, message: messageRaw, body: parsedBody } = extractToFromAndMessage(req.body || {});
     let to = toRaw ?? req.query.to;
+    let from = fromRaw ?? req.query.from;
     let message = messageRaw ?? req.query.message;
 
     const attachmentsFromBody = 
@@ -958,6 +990,7 @@ const handleProviderSend = async (req, res) => {
 
     console.log("[provider] send request:", { 
       to, 
+      from, // NEW: Log the 'from' field
       messagePreview: message?.slice(0, 50),
       attachmentsInBody: attachmentsFromBody.length 
     });
@@ -975,8 +1008,16 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
 
-    // Find which server handles this phone number
-    const server = findServerForPhone(e164);
+    // NEW v3.4: Find which server to use based on 'from' field (parking number)
+    let server;
+    if (from) {
+      console.log(`[provider] GHL sent 'from' field: ${from}`);
+      server = findServerByParkingNumber(from);
+    } else {
+      console.log(`[provider] No 'from' field in request, falling back to 'to' number routing`);
+      server = findServerForPhone(e164);
+    }
+    
     console.log(`[provider] routing to ${server.name} for ${e164}`);
 
     const chatGuid = chatGuidForPhone(e164);
@@ -1057,6 +1098,8 @@ const handleProviderSend = async (req, res) => {
       provider: "eden-imessage",
       relay: server.baseUrl,
       server: server.name,
+      parkingNumber: server.parkingNumber,
+      routedBy: from ? "from-field" : "to-field-fallback",
       id: data?.guid || data?.data?.guid || payload.tempGuid,
       attachmentCount: successfulAttachments,
       attachmentsRequested: attachmentsFromBody.length,
@@ -1411,8 +1454,8 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.3",
-    mode: "multi-server-with-env-parking-numbers",
+    version: "3.4",
+    mode: "single-provider-multi-server-routing",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
@@ -1430,6 +1473,8 @@ app.get("/", (_req, res) => {
       userAssignment: true,
       dedicatedParkingNumbers: true,
       envConfigurableParkingNumbers: true,
+      singleProviderRouting: true,
+      fromFieldRouting: true,
       textMessages: true,
       inboundAttachments: true,
       outboundAttachments: true,
@@ -1441,7 +1486,7 @@ app.get("/", (_req, res) => {
     messageFlow: {
       "contact→you": "Thread as iMessage with attachments",
       "you→contact (iPhone)": "Thread as iMessage with attachments + header",
-      "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS (routed to correct server)",
+      "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS (routed by 'from' field)",
       "non-contact": "IGNORED (privacy filter)",
     },
     routing: {
@@ -1687,7 +1732,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.3</div>
+        <div class="powered-by">Powered by Eden Bridge v3.4</div>
       </div>
       
       <script>
@@ -1836,7 +1881,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.3</div>
+        <div class="powered-by">Powered by Eden Bridge v3.4</div>
       </div>
     </body>
     </html>
@@ -1864,7 +1909,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.3 - Multi-Server with ENV Parking Numbers! 🎉✨`);
+    console.log(`[bridge] VERSION 3.4 - Single Provider Multi-Server Routing! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -1887,6 +1932,8 @@ app.post("/call-initiated", async (req, res) => {
     console.log("");
     console.log("📋 Features:");
     console.log("  ✅ Multiple BlueBubbles servers");
+    console.log("  ✅ Single conversation provider (like SendBlue)");
+    console.log("  ✅ Routes by 'from' field in GHL request");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
