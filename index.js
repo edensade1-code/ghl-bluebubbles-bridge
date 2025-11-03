@@ -1405,14 +1405,10 @@ app.post("/webhook/bluebubbles", async (req, res) => {
   return handleBlueBubblesWebhook(req, res, null);
 });
 
-// Legacy webhook endpoint - redirects to new endpoint
+// Legacy webhook endpoint - redirects to generic
 app.post("/webhook", async (req, res) => {
-  console.log("[webhook] legacy endpoint called, processing...");
-  return app._router.handle(
-    Object.assign(req, { url: '/webhook/bluebubbles', originalUrl: '/webhook/bluebubbles' }),
-    res,
-    () => {}
-  );
+  console.log("[webhook] legacy /webhook endpoint called, processing...");
+  return handleBlueBubblesWebhook(req, res, null);
 });
 
 /* -------------------------------------------------------------------------- */
