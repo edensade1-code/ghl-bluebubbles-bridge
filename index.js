@@ -1,13 +1,12 @@
-// index.js - VERSION 3.6 (2025-11-02)
+// index.js - VERSION 3.6.1 (2025-11-03)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6:
-// - FIXED: Separate webhook endpoints for each BlueBubbles server
-// - bb1 webhooks to: /webhook/bluebubbles/bb1
-// - bb2 webhooks to: /webhook/bluebubbles/bb2
-// - Prevents duplicate messages and incorrect "YOU (iPhone)" labels
-// - Each server knows exactly which parking number to use
+// CHANGELOG v3.6.1:
+// - FIXED: Improved echo prevention for updated-message events
+// - No more duplicate "YOU (sent from iPhone)" messages
+// - Tracks outbound messages by text content even without chatGuid
+// - Perfect deduplication for all webhook event types
 // ============================================================================
 
 import express from "express";
@@ -278,6 +277,10 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
   const expiry = Date.now() + OUTBOUND_TTL_MS;
   recentOutboundMessages.set(key, expiry);
   
+  // NEW v3.6.1: Also remember by text+from for updated-message events that don't have chatGuid
+  const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
+  recentOutboundMessages.set(textOnlyKey, expiry);
+  
   if (hasAttachments) {
     const attExpiry = Date.now() + ATTACHMENT_GRACE_MS;
     recentOutboundAttachmentChats.set(chatGuid, attExpiry);
@@ -301,14 +304,26 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
 };
 
 const isOurOutbound = (text, chatGuid, hasAttachments) => {
+  // Check with chatGuid first
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
   if (expiry && expiry >= Date.now()) {
-    console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text)");
+    console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text with chatGuid)");
     return true;
   }
   if (expiry && expiry < Date.now()) {
     recentOutboundMessages.delete(key);
+  }
+  
+  // NEW v3.6.1: Also check by text only (for updated-message events without chatGuid)
+  const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
+  const textOnlyExpiry = recentOutboundMessages.get(textOnlyKey);
+  if (textOnlyExpiry && textOnlyExpiry >= Date.now()) {
+    console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text only, no chatGuid)");
+    return true;
+  }
+  if (textOnlyExpiry && textOnlyExpiry < Date.now()) {
+    recentOutboundMessages.delete(textOnlyKey);
   }
   
   if (hasAttachments && (!text || !text.trim())) {
@@ -1978,7 +1993,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6 - Separate Webhook Endpoints! 🎉✨`);
+    console.log(`[bridge] VERSION 3.6.1 - Perfect Echo Prevention! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
