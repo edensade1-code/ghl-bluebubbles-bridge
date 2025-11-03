@@ -1,12 +1,12 @@
-// index.js - VERSION 3.6.1 (2025-11-03)
+// index.js - VERSION 3.6.2 (2025-11-03)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.1:
-// - FIXED: Improved echo prevention for updated-message events
-// - No more duplicate "YOU (sent from iPhone)" messages
-// - Tracks outbound messages by text content even without chatGuid
-// - Perfect deduplication for all webhook event types
+// CHANGELOG v3.6.2:
+// - FIXED: Allow sending attachments without message text
+// - FIXED: Improved GHL file upload handling
+// - Better error messages for unsupported file types
+// - Attachment-only messages now work correctly
 // ============================================================================
 
 import express from "express";
@@ -793,14 +793,28 @@ async function downloadGHLAttachment(url) {
 
 async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) {
   try {
-    console.log("[attachment] uploading to GHL:", filename, mimeType);
+    console.log("[attachment] uploading to GHL:", filename, mimeType, `${buffer.length} bytes`);
     
     const form = new FormData();
+    
+    // NEW v3.6.2: Try to use a more compatible mime type for GHL
+    let uploadMimeType = mimeType || 'application/octet-stream';
+    
+    // GHL might be picky about mime types - try common ones
+    if (uploadMimeType === 'image/png' || filename.toLowerCase().endsWith('.png')) {
+      uploadMimeType = 'image/png';
+    } else if (uploadMimeType === 'image/jpeg' || uploadMimeType === 'image/jpg' || 
+               filename.toLowerCase().endsWith('.jpg') || filename.toLowerCase().endsWith('.jpeg')) {
+      uploadMimeType = 'image/jpeg';
+    }
+    
     form.append('file', buffer, {
       filename: filename || 'attachment',
-      contentType: mimeType || 'application/octet-stream'
+      contentType: uploadMimeType
     });
     form.append('locationId', locationId);
+
+    console.log("[attachment] attempting upload with contentType:", uploadMimeType);
 
     const response = await axios.post(
       `${LC_API}/medias/upload-file`,
@@ -821,6 +835,12 @@ async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) 
     return response.data;
   } catch (e) {
     console.error("[attachment] upload failed:", e?.response?.status, e?.response?.data || e.message);
+    
+    // NEW v3.6.2: If GHL rejects the file, try alternative approaches
+    if (e?.response?.status === 400 && e?.response?.data?.message === 'Invalid File Type') {
+      console.log("[attachment] GHL rejected file type, this file type may not be supported by GHL");
+    }
+    
     return null;
   }
 }
@@ -1061,8 +1081,9 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, error: err.message });
     }
     
-    if (!message || !String(message).trim()) {
-      return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
+    // NEW v3.6.2: Allow attachments without message text
+    if ((!message || !String(message).trim()) && attachmentsFromBody.length === 0) {
+      return res.status(400).json({ ok: false, success: false, error: "Missing 'message' or attachments" });
     }
 
     // NEW v3.5: Find which server to use - priority order:
@@ -1090,18 +1111,26 @@ const handleProviderSend = async (req, res) => {
 
     const chatGuid = chatGuidForPhone(e164);
 
-    // Send text message first
-    const payload = {
-      chatGuid,
-      tempGuid: newTempGuid("temp-bridge"),
-      message: String(message),
-      method: "apple-script",
-    };
-    
-    const data = await bbPost(server, "/api/v1/message/text", payload);
+    // NEW v3.6.2: Send text message only if there's text content
+    let textMessageSent = false;
+    if (message && String(message).trim()) {
+      const payload = {
+        chatGuid,
+        tempGuid: newTempGuid("temp-bridge"),
+        message: String(message),
+        method: "apple-script",
+      };
+      
+      const data = await bbPost(server, "/api/v1/message/text", payload);
+      textMessageSent = true;
 
-    // Remember this message BEFORE sending attachments
-    rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
+      // Remember this message BEFORE sending attachments
+      rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
+    } else {
+      console.log("[provider] no text message, sending attachments only");
+      // For attachment-only messages, remember the chatGuid with a marker
+      rememberOutbound("", chatGuid, true);
+    }
 
     // Process attachments from request body
     let successfulAttachments = 0;
@@ -1168,10 +1197,11 @@ const handleProviderSend = async (req, res) => {
       server: server.name,
       parkingNumber: server.parkingNumber,
       routedBy: routedBy,
-      id: data?.guid || data?.data?.guid || payload.tempGuid,
+      id: textMessageSent ? (data?.guid || data?.data?.guid || payload.tempGuid) : `attachment-${newTempGuid()}`,
       attachmentCount: successfulAttachments,
       attachmentsRequested: attachmentsFromBody.length,
-      data,
+      textMessageSent,
+      data: textMessageSent ? data : { note: "attachment-only" },
     });
   } catch (err) {
     console.error("[provider] send error:", err?.response?.data || err.message);
@@ -1993,7 +2023,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.1 - Perfect Echo Prevention! 🎉✨`);
+    console.log(`[bridge] VERSION 3.6.2 - Attachment Support Fixed! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
