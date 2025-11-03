@@ -1,13 +1,10 @@
-// index.js - VERSION 3.5 (2025-11-02)
+// index.js - VERSION 3.5.1 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.5:
-// - FIXED: Now routes by GHL userId (most reliable method!)
-// - GHL sends userId in requests, we map it to the correct server
-// - Priority: userId → from field → to field (fallback)
-// - Works with single conversation provider
-// - No need for multiple providers or 'from' field
+// CHANGELOG v3.5.1:
+// - Added debug logging to see what password is being used
+// - Shows password length and first 10 chars for debugging
 // ============================================================================
 
 import express from "express";
@@ -456,6 +453,12 @@ const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 
 const bbPost = async (server, path, body) => {
   const url = `${server.baseUrl}${path}?guid=${encodeURIComponent(server.password)}`;
+  
+  // DEBUG: Log the password and URL (sanitized)
+  console.log(`[bbPost][${server.id}] password length: ${server.password?.length || 0}`);
+  console.log(`[bbPost][${server.id}] password starts with: ${server.password?.substring(0, 10)}...`);
+  console.log(`[bbPost][${server.id}] calling URL: ${server.baseUrl}${path}?guid=[REDACTED]`);
+  
   try {
     const { data } = await axios.post(url, body, {
       headers: { "Content-Type": "application/json" },
