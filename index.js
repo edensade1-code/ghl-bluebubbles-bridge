@@ -1,13 +1,11 @@
-// index.js - VERSION 3.4 (2025-11-02)
+// index.js - VERSION 3.4.1 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.4:
-// - FIXED: Now reads 'from' field in GHL requests to determine routing
-// - FIXED: Single conversation provider can now handle multiple users/servers
-// - Works like SendBlue/Linqblue - one provider, multiple numbers
-// - Automatically routes based on parking number in 'from' field
-// - Enhanced logging to show what 'from' number GHL is sending
+// CHANGELOG v3.4.1:
+// - Added extensive logging to see full GHL request body
+// - Logs all fields GHL sends to help debug routing
+// - Shows extracted values clearly
 // ============================================================================
 
 import express from "express";
@@ -976,6 +974,13 @@ const handleProviderSend = async (req, res) => {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
 
+    // NEW v3.4.1: Log the ENTIRE request body to see what GHL sends
+    console.log("[provider] ========== FULL REQUEST BODY ==========");
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log("[provider] ========== QUERY PARAMS ==========");
+    console.log(JSON.stringify(req.query, null, 2));
+    console.log("[provider] ========================================");
+
     const { to: toRaw, from: fromRaw, message: messageRaw, body: parsedBody } = extractToFromAndMessage(req.body || {});
     let to = toRaw ?? req.query.to;
     let from = fromRaw ?? req.query.from;
@@ -988,7 +993,7 @@ const handleProviderSend = async (req, res) => {
       parsedBody?.images || 
       [];
 
-    console.log("[provider] send request:", { 
+    console.log("[provider] EXTRACTED VALUES:", { 
       to, 
       from, // NEW: Log the 'from' field
       messagePreview: message?.slice(0, 50),
@@ -1909,7 +1914,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.4 - Single Provider Multi-Server Routing! 🎉✨`);
+    console.log(`[bridge] VERSION 3.4.1 - Enhanced Logging for Debugging! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
