@@ -1,11 +1,13 @@
-// index.js - VERSION 3.4.1 (2025-11-02)
+// index.js - VERSION 3.5 (2025-11-02)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.4.1:
-// - Added extensive logging to see full GHL request body
-// - Logs all fields GHL sends to help debug routing
-// - Shows extracted values clearly
+// CHANGELOG v3.5:
+// - FIXED: Now routes by GHL userId (most reliable method!)
+// - GHL sends userId in requests, we map it to the correct server
+// - Priority: userId → from field → to field (fallback)
+// - Works with single conversation provider
+// - No need for multiple providers or 'from' field
 // ============================================================================
 
 import express from "express";
@@ -71,6 +73,10 @@ app.use(morgan("tiny"));
 const PARKING_NUMBER_EDEN = (process.env.PARKING_NUMBER_EDEN || "+17867334163").trim();
 const PARKING_NUMBER_MARIO = (process.env.PARKING_NUMBER_MARIO || "+17868828328").trim();
 
+// GHL User ID mapping (get these from GHL Settings -> My Staff)
+const GHL_USER_ID_EDEN = "11umP2K61R5cuEoadD9x";
+const GHL_USER_ID_MARIO = "7XskZuGiwXLneiUx10ne";
+
 /* -------------------------------------------------------------------------- */
 /* Config - BlueBubbles Servers with Parking Numbers from Env Vars            */
 /* -------------------------------------------------------------------------- */
@@ -83,6 +89,7 @@ const BLUEBUBBLES_SERVERS = [
     baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
     parkingNumber: PARKING_NUMBER_EDEN, // From env var PARKING_NUMBER_EDEN
+    ghlUserId: GHL_USER_ID_EDEN, // Eden's GHL user ID
     // iMessage phone numbers handled by this server
     phoneNumbers: [
       "+13058337256", // Eden's iMessage number
@@ -95,6 +102,7 @@ const BLUEBUBBLES_SERVERS = [
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025!",
     parkingNumber: PARKING_NUMBER_MARIO, // From env var PARKING_NUMBER_MARIO
+    ghlUserId: GHL_USER_ID_MARIO, // Mario's GHL user ID
     // iMessage phone numbers handled by this server
     phoneNumbers: [
       "+13059273268", // Mario's iMessage number
@@ -126,6 +134,12 @@ for (const server of BLUEBUBBLES_SERVERS) {
   PARKING_TO_SERVER_MAP[server.parkingNumber] = server;
 }
 
+// Build GHL userId to server map for quick lookup
+const USERID_TO_SERVER_MAP = {};
+for (const server of BLUEBUBBLES_SERVERS) {
+  USERID_TO_SERVER_MAP[server.ghlUserId] = server;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Config - Environment Variables                                             */
 /* -------------------------------------------------------------------------- */
@@ -155,6 +169,19 @@ const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 /* -------------------------------------------------------------------------- */
 /* BlueBubbles Server Routing                                                 */
 /* -------------------------------------------------------------------------- */
+
+// NEW v3.5: Find server by GHL userId
+function findServerByUserId(userId) {
+  const server = USERID_TO_SERVER_MAP[userId];
+  
+  if (server) {
+    console.log(`[routing] GHL userId ${userId} → ${server.name} (${server.ghlUser})`);
+    return server;
+  }
+  
+  console.log(`[routing] No server found for userId ${userId}, using default`);
+  return BLUEBUBBLES_SERVERS[0];
+}
 
 // NEW: Find server by parking number (from GHL 'from' field)
 function findServerByParkingNumber(parkingE164) {
@@ -949,7 +976,7 @@ function extractToFromAndMessage(rawBody = {}) {
     body.destination ||
     null;
 
-  // NEW v3.4: Extract 'from' field (parking number from GHL)
+  // Extract 'from' field (parking number from GHL)
   const from =
     body.from ||
     body.fromNumber ||
@@ -958,6 +985,9 @@ function extractToFromAndMessage(rawBody = {}) {
     body.parkingNumber ||
     null;
 
+  // NEW v3.5: Extract userId field from GHL
+  const userId = body.userId || body.user_id || body.userID || null;
+
   const message =
     body.message ||
     body.text ||
@@ -965,7 +995,7 @@ function extractToFromAndMessage(rawBody = {}) {
     body.content ||
     null;
 
-  return { to, from, message, body };
+  return { to, from, userId, message, body };
 }
 
 const handleProviderSend = async (req, res) => {
@@ -981,7 +1011,7 @@ const handleProviderSend = async (req, res) => {
     console.log(JSON.stringify(req.query, null, 2));
     console.log("[provider] ========================================");
 
-    const { to: toRaw, from: fromRaw, message: messageRaw, body: parsedBody } = extractToFromAndMessage(req.body || {});
+    const { to: toRaw, from: fromRaw, userId, message: messageRaw, body: parsedBody } = extractToFromAndMessage(req.body || {});
     let to = toRaw ?? req.query.to;
     let from = fromRaw ?? req.query.from;
     let message = messageRaw ?? req.query.message;
@@ -995,7 +1025,8 @@ const handleProviderSend = async (req, res) => {
 
     console.log("[provider] EXTRACTED VALUES:", { 
       to, 
-      from, // NEW: Log the 'from' field
+      from,
+      userId, // NEW: Log userId
       messagePreview: message?.slice(0, 50),
       attachmentsInBody: attachmentsFromBody.length 
     });
@@ -1013,14 +1044,25 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
 
-    // NEW v3.4: Find which server to use based on 'from' field (parking number)
+    // NEW v3.5: Find which server to use - priority order:
+    // 1. userId (most reliable)
+    // 2. from field (parking number)
+    // 3. to field (fallback)
     let server;
-    if (from) {
+    let routedBy = "unknown";
+    
+    if (userId) {
+      console.log(`[provider] GHL sent userId: ${userId}`);
+      server = findServerByUserId(userId);
+      routedBy = "userId";
+    } else if (from) {
       console.log(`[provider] GHL sent 'from' field: ${from}`);
       server = findServerByParkingNumber(from);
+      routedBy = "from-field";
     } else {
-      console.log(`[provider] No 'from' field in request, falling back to 'to' number routing`);
+      console.log(`[provider] No userId or 'from' field, falling back to 'to' number routing`);
       server = findServerForPhone(e164);
+      routedBy = "to-field-fallback";
     }
     
     console.log(`[provider] routing to ${server.name} for ${e164}`);
@@ -1104,7 +1146,7 @@ const handleProviderSend = async (req, res) => {
       relay: server.baseUrl,
       server: server.name,
       parkingNumber: server.parkingNumber,
-      routedBy: from ? "from-field" : "to-field-fallback",
+      routedBy: routedBy,
       id: data?.guid || data?.data?.guid || payload.tempGuid,
       attachmentCount: successfulAttachments,
       attachmentsRequested: attachmentsFromBody.length,
@@ -1914,7 +1956,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.4.1 - Enhanced Logging for Debugging! 🎉✨`);
+    console.log(`[bridge] VERSION 3.5 - Routes by GHL userId! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -1938,7 +1980,7 @@ app.post("/call-initiated", async (req, res) => {
     console.log("📋 Features:");
     console.log("  ✅ Multiple BlueBubbles servers");
     console.log("  ✅ Single conversation provider (like SendBlue)");
-    console.log("  ✅ Routes by 'from' field in GHL request");
+    console.log("  ✅ Routes by GHL userId (most reliable!)");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
