@@ -71,8 +71,8 @@ const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
     name: "Server 1 (Original Mac)",
-    baseUrl: "https://relay.asapcashhomebuyers.com",
-    password: process.env.BB1_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
+    baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
+    password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
     // Phone numbers handled by this server
     phoneNumbers: [
       // Add your first server's phone numbers here
