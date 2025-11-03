@@ -1,8 +1,8 @@
-// index.js - VERSION 3.0 (2025-10-25)
+// index.js - VERSION 3.1 (2025-11-02)
 // ============================================================================
-// PROJECT: Eden Bridge - BlueBubbles ↔ GHL + Chrome Extension Calling
+// PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// LATEST UPDATE: Added click-to-call endpoints for Chrome extension integration!
+// NEW: Support for multiple BlueBubbles servers with user assignment!
 // ============================================================================
 
 import express from "express";
@@ -63,12 +63,47 @@ app.use(
 app.use(morgan("tiny"));
 
 /* -------------------------------------------------------------------------- */
+/* Config - BlueBubbles Servers                                               */
+/* -------------------------------------------------------------------------- */
+// Define your BlueBubbles servers here
+// Each server can handle multiple phone numbers
+const BLUEBUBBLES_SERVERS = [
+  {
+    id: "bb1",
+    name: "Server 1 (Original Mac)",
+    baseUrl: "https://relay.asapcashhomebuyers.com",
+    password: process.env.BB1_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
+    // Phone numbers handled by this server
+    phoneNumbers: [
+      // Add your first server's phone numbers here
+      // "+13051234567",
+    ],
+  },
+  {
+    id: "bb2",
+    name: "Server 2 (Mac Mini)",
+    baseUrl: "https://bb2.asapcashhomebuyers.com",
+    password: process.env.BB2_GUID || "EdenBridge2025!",
+    // Phone numbers handled by this server
+    phoneNumbers: [
+      "+13059273268", // The number we just set up
+    ],
+  },
+];
+
+// Map phone numbers to GHL users
+// Format: { "phoneNumber": "ghlUserId" }
+const PHONE_TO_USER_MAP = {
+  "+13059273268": "default", // Will be updated when you have GHL user IDs
+  // Add more mappings as you add numbers
+  // "+13051234567": "user_abc123",
+  // "+13059876543": "user_xyz789",
+};
+
+/* -------------------------------------------------------------------------- */
 /* Config - Environment Variables                                             */
 /* -------------------------------------------------------------------------- */
 const PORT = Number(process.env.PORT || 8080);
-
-const BB_BASE = (process.env.BB_BASE || "https://relay.asapcashhomebuyers.com").trim();
-const BB_GUID = (process.env.BB_GUID || "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD").trim();
 
 const GHL_INBOUND_URL = (process.env.GHL_INBOUND_URL || "").trim();
 
@@ -95,6 +130,35 @@ const CONVERSATION_PROVIDER_ID = (process.env.CONVERSATION_PROVIDER_ID || "68d94
 const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 
 /* -------------------------------------------------------------------------- */
+/* BlueBubbles Server Routing                                                 */
+/* -------------------------------------------------------------------------- */
+
+// Find which BlueBubbles server handles a given phone number
+function findServerForPhone(phoneE164) {
+  for (const server of BLUEBUBBLES_SERVERS) {
+    if (server.phoneNumbers.includes(phoneE164)) {
+      return server;
+    }
+  }
+  // Default to first server if not found
+  return BLUEBUBBLES_SERVERS[0];
+}
+
+// Get all active phone numbers from all servers
+function getAllPhoneNumbers() {
+  const allNumbers = [];
+  for (const server of BLUEBUBBLES_SERVERS) {
+    allNumbers.push(...server.phoneNumbers);
+  }
+  return allNumbers;
+}
+
+// Get GHL user ID for a phone number
+function getUserForPhone(phoneE164) {
+  return PHONE_TO_USER_MAP[phoneE164] || "default";
+}
+
+/* -------------------------------------------------------------------------- */
 /* State & Helper Functions                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -115,7 +179,6 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
   const expiry = Date.now() + OUTBOUND_TTL_MS;
   recentOutboundMessages.set(key, expiry);
   
-  // If this message has attachments, track the chat for grace period
   if (hasAttachments) {
     const attExpiry = Date.now() + ATTACHMENT_GRACE_MS;
     recentOutboundAttachmentChats.set(chatGuid, attExpiry);
@@ -124,7 +187,6 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
     console.log("[outbound-tracker] remembered:", { chatGuid, textPreview: text?.slice(0, 32) });
   }
   
-  // Clean up old entries
   if (recentOutboundMessages.size > 100) {
     const now = Date.now();
     for (const [k, exp] of recentOutboundMessages.entries()) {
@@ -140,7 +202,6 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
 };
 
 const isOurOutbound = (text, chatGuid, hasAttachments) => {
-  // Check if this is a text message we sent
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
   if (expiry && expiry >= Date.now()) {
@@ -151,7 +212,6 @@ const isOurOutbound = (text, chatGuid, hasAttachments) => {
     recentOutboundMessages.delete(key);
   }
   
-  // Check if this is an attachment-only message in the grace period
   if (hasAttachments && (!text || !text.trim())) {
     const attExpiry = recentOutboundAttachmentChats.get(chatGuid);
     if (attExpiry && attExpiry >= Date.now()) {
@@ -252,9 +312,13 @@ async function saveTokenStore() {
 /* Startup Validation                                                         */
 /* -------------------------------------------------------------------------- */
 
-if (!BB_GUID || BB_GUID === "REPLACE_WITH_BLUEBUBBLES_SERVER_PASSWORD") {
-  console.warn("[WARN] BB_GUID is not set. Set your BlueBubbles server password.");
+// Validate server configurations
+for (const server of BLUEBUBBLES_SERVERS) {
+  if (!server.password || server.password.includes("REPLACE_WITH")) {
+    console.warn(`[WARN] ${server.name} password not set properly!`);
+  }
 }
+
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
 }
@@ -297,11 +361,11 @@ function getIdentityNumber() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* BlueBubbles API Helpers                                                    */
+/* BlueBubbles API Helpers (Multi-Server)                                     */
 /* -------------------------------------------------------------------------- */
 
-const bbPost = async (path, body) => {
-  const url = `${BB_BASE}${path}?guid=${encodeURIComponent(BB_GUID)}`;
+const bbPost = async (server, path, body) => {
+  const url = `${server.baseUrl}${path}?guid=${encodeURIComponent(server.password)}`;
   try {
     const { data } = await axios.post(url, body, {
       headers: { "Content-Type": "application/json" },
@@ -309,24 +373,24 @@ const bbPost = async (path, body) => {
     });
     return data;
   } catch (err) {
-    console.error("[bbPost] failed:", path, err?.response?.status, err.message);
+    console.error(`[bbPost][${server.id}] failed:`, path, err?.response?.status, err.message);
     throw err;
   }
 };
 
-const bbGet = async (path) => {
-  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+const bbGet = async (server, path) => {
+  const url = `${server.baseUrl}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(server.password)}`;
   try {
     const { data } = await axios.get(url, { timeout: 15000 });
     return data;
   } catch (err) {
-    console.error("[bbGet] failed:", path, err?.response?.status, err.message);
+    console.error(`[bbGet][${server.id}] failed:`, path, err?.response?.status, err.message);
     throw err;
   }
 };
 
-const bbGetBuffer = async (path) => {
-  const url = `${BB_BASE}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(BB_GUID)}`;
+const bbGetBuffer = async (server, path) => {
+  const url = `${server.baseUrl}${path}${path.includes("?") ? "&" : "?"}guid=${encodeURIComponent(server.password)}`;
   try {
     const { data } = await axios.get(url, { 
       timeout: 30000,
@@ -334,12 +398,12 @@ const bbGetBuffer = async (path) => {
     });
     return data;
   } catch (err) {
-    console.error("[bbGetBuffer] failed:", path, err?.response?.status, err.message);
+    console.error(`[bbGetBuffer][${server.id}] failed:`, path, err?.response?.status, err.message);
     throw err;
   }
 };
 
-const bbUploadAttachment = async (chatGuid, buffer, filename) => {
+const bbUploadAttachment = async (server, chatGuid, buffer, filename) => {
   try {
     const form = new FormData();
     form.append('attachment', buffer, {
@@ -350,7 +414,7 @@ const bbUploadAttachment = async (chatGuid, buffer, filename) => {
     form.append('tempGuid', newTempGuid('att'));
     form.append('name', filename || 'attachment');
 
-    const url = `${BB_BASE}/api/v1/message/attachment?guid=${encodeURIComponent(BB_GUID)}`;
+    const url = `${server.baseUrl}/api/v1/message/attachment?guid=${encodeURIComponent(server.password)}`;
     
     const { data } = await axios.post(url, form, {
       headers: form.getHeaders(),
@@ -361,7 +425,7 @@ const bbUploadAttachment = async (chatGuid, buffer, filename) => {
     
     return data;
   } catch (err) {
-    console.error("[bbUploadAttachment] failed:", err?.response?.status, err?.response?.data || err.message);
+    console.error(`[bbUploadAttachment][${server.id}] failed:`, err?.response?.status, err?.response?.data || err.message);
     throw err;
   }
 };
@@ -531,53 +595,39 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 /* Attachment Handling                                                        */
 /* -------------------------------------------------------------------------- */
 
-// Detect MIME type from buffer's magic bytes
 function detectMimeType(buffer, filename = '') {
   if (!buffer || buffer.length === 0) return 'application/octet-stream';
   
   const bytes = buffer.slice(0, 12);
   
-  // PNG
   if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
     return 'image/png';
   }
   
-  // JPEG
   if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
     return 'image/jpeg';
   }
   
-  // GIF
   if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
     return 'image/gif';
   }
   
-  // WEBP
   if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
     return 'image/webp';
   }
   
-  // PDF
   if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
     return 'application/pdf';
   }
   
-  // ZIP
   if (bytes[0] === 0x50 && bytes[1] === 0x4B && (bytes[2] === 0x03 || bytes[2] === 0x05)) {
     return 'application/zip';
   }
   
-  // MP4
   if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
     return 'video/mp4';
   }
   
-  // MOV
-  if (bytes.indexOf(0x6D6F6F76) !== -1 || bytes.indexOf(0x66726565) !== -1) {
-    return 'video/quicktime';
-  }
-  
-  // Fallback to filename extension
   const ext = filename.toLowerCase().split('.').pop();
   const extMap = {
     'png': 'image/png',
@@ -596,13 +646,13 @@ function detectMimeType(buffer, filename = '') {
   return extMap[ext] || 'application/octet-stream';
 }
 
-async function downloadBBAttachment(attachmentGuid) {
+async function downloadBBAttachment(server, attachmentGuid) {
   try {
-    console.log("[attachment] downloading from BB:", attachmentGuid);
-    const buffer = await bbGetBuffer(`/api/v1/attachment/${encodeURIComponent(attachmentGuid)}/download`);
+    console.log(`[attachment][${server.id}] downloading from BB:`, attachmentGuid);
+    const buffer = await bbGetBuffer(server, `/api/v1/attachment/${encodeURIComponent(attachmentGuid)}/download`);
     return buffer;
   } catch (e) {
-    console.error("[attachment] download failed:", e.message);
+    console.error(`[attachment][${server.id}] download failed:`, e.message);
     return null;
   }
 }
@@ -617,7 +667,6 @@ async function downloadGHLAttachment(url) {
     
     const buffer = Buffer.from(response.data);
     
-    // Try to get MIME type from response headers or detect it
     let mimeType = response.headers['content-type'];
     if (!mimeType || mimeType === 'application/octet-stream') {
       mimeType = detectMimeType(buffer, url);
@@ -678,12 +727,12 @@ const pushToGhlThread = async ({
   isFromMe,
   timestamp,
   attachments = [],
+  server,
 }) => {
   let messageBody;
   
   if (isFromMe) {
     const date = timestamp ? new Date(timestamp) : new Date();
-    // Use configured timezone
     const timeStr = date.toLocaleTimeString('en-US', { 
       hour: 'numeric', 
       minute: '2-digit',
@@ -704,7 +753,7 @@ ${text || ''}`;
   let mediaUrls = [];
   
   if (attachments && attachments.length > 0) {
-    console.log(`[GHL] processing ${attachments.length} attachment(s)`);
+    console.log(`[GHL] processing ${attachments.length} attachment(s) from ${server.name}`);
     
     for (const att of attachments) {
       try {
@@ -712,19 +761,17 @@ ${text || ''}`;
         const filename = att.transferName || att.filename || 'attachment';
         let mimeType = att.mimeType || att.mime || null;
         
-        const buffer = await downloadBBAttachment(attGuid);
+        const buffer = await downloadBBAttachment(server, attGuid);
         if (!buffer) {
           console.error("[GHL] failed to download attachment:", attGuid);
           continue;
         }
         
-        // Detect MIME type if not provided
         if (!mimeType) {
           mimeType = detectMimeType(buffer, filename);
           console.log("[GHL] detected MIME type:", mimeType, "for", filename);
         }
         
-        // Generate proper filename with extension if needed
         let finalFilename = filename;
         if (!finalFilename.includes('.')) {
           const extMap = {
@@ -785,7 +832,7 @@ ${text || ''}`;
 
   const endpoint = `${LC_API}/conversations/messages/inbound`;
 
-  console.log(`[GHL] pushing to thread (${isFromMe ? 'iPhone' : 'contact'}) with ${mediaUrls.length} attachment(s)`);
+  console.log(`[GHL] pushing to thread (${isFromMe ? 'iPhone' : 'contact'}) with ${mediaUrls.length} attachment(s) via ${server.name}`);
 
   try {
     const r = await axios.post(endpoint, body, {
@@ -805,6 +852,7 @@ ${text || ''}`;
       isFromMe,
       type: "iMessage",
       attachments: mediaUrls.length,
+      server: server.name,
     });
     return resp;
   } catch (e) {
@@ -857,7 +905,6 @@ const handleProviderSend = async (req, res) => {
     let to = toRaw ?? req.query.to;
     let message = messageRaw ?? req.query.message;
 
-    // Look for attachments in the request body
     const attachmentsFromBody = 
       parsedBody?.attachments || 
       parsedBody?.mediaUrls || 
@@ -884,6 +931,10 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message'" });
     }
 
+    // Find which server handles this phone number
+    const server = findServerForPhone(e164);
+    console.log(`[provider] routing to ${server.name} for ${e164}`);
+
     const chatGuid = chatGuidForPhone(e164);
 
     // Send text message first
@@ -894,7 +945,7 @@ const handleProviderSend = async (req, res) => {
       method: "apple-script",
     };
     
-    const data = await bbPost("/api/v1/message/text", payload);
+    const data = await bbPost(server, "/api/v1/message/text", payload);
 
     // Remember this message BEFORE sending attachments
     rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
@@ -902,11 +953,10 @@ const handleProviderSend = async (req, res) => {
     // Process attachments from request body
     let successfulAttachments = 0;
     if (attachmentsFromBody.length > 0) {
-      console.log(`[provider] sending ${attachmentsFromBody.length} attachment(s) to BlueBubbles`);
+      console.log(`[provider] sending ${attachmentsFromBody.length} attachment(s) to ${server.name}`);
       
       for (const attachment of attachmentsFromBody) {
         try {
-          // Handle different attachment formats
           const attachmentUrl = 
             attachment.url || 
             attachment.src || 
@@ -922,7 +972,6 @@ const handleProviderSend = async (req, res) => {
           
           console.log("[provider] downloading attachment:", attachmentUrl);
           
-          // Download from GHL
           const downloadResult = await downloadGHLAttachment(attachmentUrl);
           if (!downloadResult || !downloadResult.buffer) {
             console.error("[provider] download failed for:", attachmentUrl);
@@ -931,7 +980,6 @@ const handleProviderSend = async (req, res) => {
 
           const { buffer, mimeType } = downloadResult;
           
-          // Add proper extension to filename based on MIME type
           if (!filename.includes('.')) {
             const extMap = {
               'image/png': '.png',
@@ -947,8 +995,7 @@ const handleProviderSend = async (req, res) => {
 
           console.log("[provider] downloaded", buffer.length, "bytes, MIME:", mimeType, "uploading to BlueBubbles...");
           
-          // Upload to BlueBubbles
-          const bbResult = await bbUploadAttachment(chatGuid, buffer, filename);
+          const bbResult = await bbUploadAttachment(server, chatGuid, buffer, filename);
           console.log("[provider] ✅ attachment sent to BlueBubbles:", bbResult?.guid || 'success');
           successfulAttachments++;
         } catch (e) {
@@ -964,7 +1011,8 @@ const handleProviderSend = async (req, res) => {
       success: true,
       status: "sent",
       provider: "eden-imessage",
-      relay: BB_BASE,
+      relay: server.baseUrl,
+      server: server.name,
       id: data?.guid || data?.data?.guid || payload.tempGuid,
       attachmentCount: successfulAttachments,
       attachmentsRequested: attachmentsFromBody.length,
@@ -986,10 +1034,10 @@ app.all("/provider/deliverl", handleProviderSend);
 app.post("/send", handleProviderSend);
 
 /* -------------------------------------------------------------------------- */
-/* Inbound Webhook - BlueBubbles → Bridge → GHL                              */
+/* Inbound Webhook - BlueBubbles → Bridge → GHL (Multi-Server)               */
 /* -------------------------------------------------------------------------- */
 
-app.post("/webhook", async (req, res) => {
+app.post("/webhook/bluebubbles", async (req, res) => {
   try {
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
 
@@ -1085,6 +1133,10 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
+    // Find which server this message came from
+    const server = findServerForPhone(contactE164);
+    console.log(`[inbound] message from ${server.name} for ${contactE164}`);
+
     const locationNumber = getIdentityNumber();
     if (!locationNumber) {
       console.error("[inbound] PARKING_NUMBER NOT SET OR INVALID");
@@ -1105,7 +1157,8 @@ app.post("/webhook", async (req, res) => {
         phone: contactE164,
         isFromMe,
         messagePreview: messageText?.slice(0, 30),
-        hasAttachments
+        hasAttachments,
+        server: server.name,
       });
       return res.status(200).json({ ok: true, dropped: "no-contact", reason: "privacy-filter" });
     }
@@ -1117,9 +1170,9 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (isFromMe) {
-      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''}`);
+      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name}`);
     } else {
-      console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''}`);
+      console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name}`);
     }
     
     const pushed = await pushToGhlThread({
@@ -1131,6 +1184,7 @@ app.post("/webhook", async (req, res) => {
       isFromMe,
       timestamp,
       attachments: hasAttachments ? attachments : [],
+      server,
     });
 
     if (!pushed) {
@@ -1138,7 +1192,7 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).json({ ok: true, note: "push-failed" });
     }
 
-    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''}`);
+    console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''} via ${server.name}`);
 
     rememberPush({
       locationId,
@@ -1151,6 +1205,7 @@ app.post("/webhook", async (req, res) => {
       hasAttachments,
       attachmentCount: attachments?.length || 0,
       handledAs: "conversation-thread-imessage",
+      server: server.name,
     });
 
     if (GHL_INBOUND_URL) {
@@ -1168,6 +1223,7 @@ app.post("/webhook", async (req, res) => {
             attachmentCount: attachments?.length || 0,
             handledAs: "conversation-thread-imessage",
             receivedAt: new Date().toISOString(),
+            server: server.name,
           },
           { headers: { "Content-Type": "application/json" }, timeout: 10000 }
         );
@@ -1176,11 +1232,21 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    return res.status(200).json({ ok: true, pushed });
+    return res.status(200).json({ ok: true, pushed, server: server.name });
   } catch (err) {
     console.error("[inbound] EXCEPTION:", err?.response?.data || err.message, err.stack);
     return res.status(200).json({ ok: true, error: "ingest-failed" });
   }
+});
+
+// Legacy webhook endpoint - redirects to new endpoint
+app.post("/webhook", async (req, res) => {
+  console.log("[webhook] legacy endpoint called, processing...");
+  return app._router.handle(
+    Object.assign(req, { url: '/webhook/bluebubbles', originalUrl: '/webhook/bluebubbles' }),
+    res,
+    () => {}
+  );
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1275,77 +1341,13 @@ app.get("/oauth/debug", (_req, res) => {
     locationsWithTokens: Array.from(tokenStore.keys()),
     tokensFile: TOKENS_FILE,
     parkingNumber: ENV_PARKING_NUMBER || null,
+    servers: BLUEBUBBLES_SERVERS.map(s => ({
+      id: s.id,
+      name: s.name,
+      baseUrl: s.baseUrl,
+      phoneCount: s.phoneNumbers.length,
+    })),
   });
-});
-
-/* -------------------------------------------------------------------------- */
-/* Embedded UI - Private iMessage inbox                                       */
-/* -------------------------------------------------------------------------- */
-
-app.get("/api/chats", async (_req, res) => {
-  try {
-    const data = await bbGet("/api/v1/chats");
-    const chats = (data?.data ?? data ?? []).map((c) => ({
-      guid: c.guid,
-      name: c.displayName || c.chatIdentifier || c.guid,
-      last: c?.lastMessage?.text || "",
-    }));
-    res.json({ ok: true, chats });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data ?? e?.message });
-  }
-});
-
-app.get("/api/messages", async (req, res) => {
-  try {
-    const chatGuid = req.query.chatGuid;
-    if (!chatGuid) return res.status(400).json({ ok: false, error: "chatGuid required" });
-
-    const data = await bbGet(`/api/v1/chat/${encodeURIComponent(chatGuid)}/messages?limit=50`);
-    const messages = (data?.data ?? data ?? []).map((m) => ({
-      guid: m.guid,
-      text: m.text || "",
-      fromMe: !!m.isFromMe,
-      date: m.dateCreated || m.date || null,
-    }));
-    res.json({ ok: true, chatGuid, messages });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.response?.data ?? e?.message });
-  }
-});
-
-app.get("/app", (_req, res) => {
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(`<!doctype html>
-<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>iMessage Inbox</title>
-<style>:root{color-scheme:dark light}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0b0c;color:#e5e7eb}
-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #1f2937}
-.wrap{display:grid;grid-template-columns:280px 1fr;gap:0}.sidebar{border-right:1px solid #1f2937;max-height:calc(100vh - 58px);overflow:auto}
-.chat{padding:12px 14px;border-bottom:1px solid #111827;cursor:pointer}.chat:hover{background:#0f172a}.chat.active{background:#111827}
-.main{display:flex;flex-direction:column;height:calc(100vh - 58px)}.msgs{flex:1;overflow:auto;padding:16px}
-.msg{max-width:70%;margin:8px 0;padding:10px 12px;border-radius:12px;line-height:1.3;white-space:pre-wrap}.me{background:#2563eb;color:#fff;margin-left:auto}.them{background:#111827}
-.composer{display:flex;gap:8px;padding:12px;border-top:1px solid #1f2937}textarea{flex:1;background:#0b0b0c;color:#e5e7eb;border:1px solid #1f2937;border-radius:10px;padding:10px;min-height:44px}
-button{background:#16a34a;border:none;border-radius:10px;color:white;padding:10px 14px;cursor:pointer}button:disabled{opacity:.6;cursor:not-allowed}.status{font-size:12px;color:#9ca3af}</style></head>
-<body>
-<header><div><strong>📱 iMessage (Private)</strong><span class="status" id="status">checking…</span></div><div class="status">v2.30 - COMPLETE!</div></header>
-<div class="wrap"><aside class="sidebar" id="list"></aside><main class="main">
-  <div class="msgs" id="msgs"><div class="status" style="padding:16px">Pick a chat on the left.</div></div>
-  <div class="composer"><textarea id="text" placeholder="Type an iMessage…"></textarea><button id="send">Send</button></div>
-</main></div>
-<script>
-(async function(){
-  try{const r=await fetch('/oauth/debug');const j=await r.json();if(!j.locationsWithTokens||j.locationsWithTokens.length===0){(window.top===window.self?window:window.top).location.href='/oauth/start';return;}}catch(e){}
-})();
-const statusEl=document.getElementById('status'),listEl=document.getElementById('list'),msgsEl=document.getElementById('msgs'),sendBtn=document.getElementById('send'),textEl=document.getElementById('text');let current=null;
-async function ping(){try{const r=await fetch('/health');const j=await r.json();statusEl.textContent=j.ok?'online':'offline';}catch(e){statusEl.textContent='offline';}}
-async function loadChats(){const r=await fetch('/api/chats');const j=await r.json();listEl.innerHTML='';(j.chats||[]).forEach(c=>{const d=document.createElement('div');d.className='chat'+(current===c.guid?' active':'');d.textContent=(c.name||c.guid);d.onclick=()=>select(c.guid);listEl.appendChild(d);});}
-async function select(g){current=g;await renderMessages();Array.from(listEl.children).forEach(el=>{el.classList.toggle('active',el.textContent.includes(''+g));});}
-function bubble(m){const d=document.createElement('div');d.className='msg '+(m.fromMe?'me':'them');d.textContent=m.text||'';return d;}
-async function renderMessages(){if(!current)return;msgsEl.innerHTML='';const r=await fetch('/api/messages?chatGuid='+encodeURIComponent(current));const j=await r.json();(j.messages||[]).forEach(m=>msgsEl.appendChild(bubble(m)));msgsEl.scrollTop=msgsEl.scrollHeight;}
-async function send(){if(!current){alert('Pick a chat first');return;}const t=(textEl.value||'').trim();if(!t)return;let to=null;try{to=current.split(';')[2]}catch(_){ }if(!to){alert('Cannot derive phone from chatGuid');return;}sendBtn.disabled=true;try{const r=await fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to, message:t})});const j=await r.json();if(!j.ok&&!j.success){alert('Send failed: '+(j.error||'unknown'));}textEl.value='';setTimeout(renderMessages,700);}catch(e){alert('Send error: '+e.message);}finally{sendBtn.disabled=false;}}
-sendBtn.addEventListener('click',send);textEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
-(async function(){await ping();await loadChats();})();</script>
-</body></html>`);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1356,13 +1358,21 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "2.30",
-    mode: "full-bidirectional-attachments",
-    relay: BB_BASE,
+    version: "3.1",
+    mode: "multi-server-support",
+    servers: BLUEBUBBLES_SERVERS.map(s => ({
+      id: s.id,
+      name: s.name,
+      baseUrl: s.baseUrl,
+      phoneNumbers: s.phoneNumbers,
+    })),
+    totalPhoneNumbers: getAllPhoneNumbers().length,
     oauthConfigured: !!(CLIENT_ID && CLIENT_SECRET),
     parkingNumber: ENV_PARKING_NUMBER || null,
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     features: {
+      multiServer: true,
+      userAssignment: true,
       textMessages: true,
       inboundAttachments: true,
       outboundAttachments: true,
@@ -1374,22 +1384,45 @@ app.get("/", (_req, res) => {
     messageFlow: {
       "contact→you": "Thread as iMessage with attachments",
       "you→contact (iPhone)": "Thread as iMessage with attachments + header",
-      "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS (from request body)",
+      "ghl→contact": "Delivered via BlueBubbles WITH ATTACHMENTS (routed to correct server)",
       "non-contact": "IGNORED (privacy filter)",
     },
   });
 });
 
 app.get("/health", async (_req, res) => {
-  try {
-    const pong = await axios.get(
-      `${BB_BASE}/api/v1/ping?guid=${encodeURIComponent(BB_GUID)}`,
-      { timeout: 8000 }
-    );
-    res.status(200).json({ ok: true, relay: BB_BASE, ping: pong.data ?? null });
-  } catch (e) {
-    res.status(503).json({ ok: false, relay: BB_BASE, error: e?.response?.data ?? e?.message ?? "Ping failed" });
+  const serverStatuses = [];
+  
+  for (const server of BLUEBUBBLES_SERVERS) {
+    try {
+      const pong = await axios.get(
+        `${server.baseUrl}/api/v1/ping?guid=${encodeURIComponent(server.password)}`,
+        { timeout: 8000 }
+      );
+      serverStatuses.push({
+        id: server.id,
+        name: server.name,
+        baseUrl: server.baseUrl,
+        status: "online",
+        ping: pong.data ?? null,
+      });
+    } catch (e) {
+      serverStatuses.push({
+        id: server.id,
+        name: server.name,
+        baseUrl: server.baseUrl,
+        status: "offline",
+        error: e?.response?.data ?? e?.message ?? "Ping failed",
+      });
+    }
   }
+  
+  const allOnline = serverStatuses.every(s => s.status === "online");
+  
+  res.status(allOnline ? 200 : 503).json({
+    ok: allOnline,
+    servers: serverStatuses,
+  });
 });
 
 app.get("/debug/last-inbound", (_req, res) => {
@@ -1424,18 +1457,12 @@ app.get("/debug/ghl/contact-by-phone", async (req, res) => {
 /* Chrome Extension Calling Integration                                       */
 /* -------------------------------------------------------------------------- */
 
-/**
- * GET /calling
- * Click-to-call interface for Chrome extension
- * Opens when user clicks call button in GHL/CRM
- */
 app.get("/calling", (req, res) => {
   const phoneNumber = req.query.id || '';
   const origin = req.query.origin || 'extension';
   
   console.log(`[calling] Request from ${origin} for ${phoneNumber}`);
   
-  // Add no-cache headers to prevent browser from caching
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -1585,7 +1612,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge</div>
+        <div class="powered-by">Powered by Eden Bridge v3.1</div>
       </div>
       
       <script>
@@ -1593,27 +1620,21 @@ app.get("/calling", (req, res) => {
         const statusEl = document.getElementById('status');
         const callBtn = document.getElementById('callBtn');
         
-        // Normalize phone number - add +1 if missing
         function normalizePhone(phone) {
-          // Remove all non-digit characters except +
           let clean = phone.replace(/[^0-9+]/g, '');
           
-          // If it starts with +, keep it
           if (clean.startsWith('+')) {
             return clean;
           }
           
-          // If it's 11 digits starting with 1, add +
           if (clean.length === 11 && clean.startsWith('1')) {
             return '+' + clean;
           }
           
-          // If it's 10 digits, add +1
           if (clean.length === 10) {
             return '+1' + clean;
           }
           
-          // Otherwise return as-is
           return clean;
         }
         
@@ -1621,14 +1642,11 @@ app.get("/calling", (req, res) => {
           statusEl.textContent = 'Opening phone app...';
           callBtn.disabled = true;
           
-          // Normalize the phone number
           const normalizedPhone = normalizePhone(phoneNumber);
           console.log('Calling:', normalizedPhone);
           
-          // Trigger tel: URL (opens FaceTime/Phone app)
           window.location.href = 'tel:' + normalizedPhone;
           
-          // Log call attempt
           fetch('/call-initiated', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1639,26 +1657,17 @@ app.get("/calling", (req, res) => {
             })
           }).catch(err => console.log('Log failed:', err));
           
-          // Update status
           setTimeout(() => {
             statusEl.textContent = 'Call initiated! You can close this window.';
             statusEl.className = 'status success';
           }, 1000);
         }
-        
-        // Optional: Auto-call after 2 seconds (uncomment to enable)
-        // setTimeout(makeCall, 2000);
       </script>
     </body>
     </html>
   `);
 });
 
-/**
- * GET /conversations
- * Click-to-chat interface for Chrome extension
- * Opens when user clicks chat button in GHL/CRM
- */
 app.get("/conversations", (req, res) => {
   const phoneNumber = req.query.id || '';
   const origin = req.query.origin || 'extension';
@@ -1752,46 +1761,17 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge</div>
+        <div class="powered-by">Powered by Eden Bridge v3.1</div>
       </div>
     </body>
     </html>
   `);
 });
 
-/**
- * POST /call-initiated
- * Logs call attempts from Chrome extension
- */
 app.post("/call-initiated", async (req, res) => {
   try {
     const { phoneNumber, origin, timestamp } = req.body;
     console.log(`[call-initiated] ${phoneNumber} from ${origin} at ${timestamp}`);
-    
-    // Optional: Log to GHL activity
-    // Uncomment and implement if you want to track calls in GHL
-    /*
-    const any = getAnyLocation();
-    if (any) {
-      const { locationId } = any;
-      const contactId = await findContactIdByPhone(locationId, ensureE164(phoneNumber));
-      
-      if (contactId) {
-        await withLcCall(locationId, async (token) => {
-          await axios.post(
-            \`\${LC_API}/contacts/\${contactId}/notes\`,
-            {
-              body: \`📞 Call initiated via Chrome extension to \${phoneNumber}\`,
-            },
-            {
-              headers: lcHeaders(token),
-              timeout: 10000
-            }
-          );
-        });
-      }
-    }
-    */
     
     res.json({ ok: true, logged: true, timestamp });
   } catch (error) {
@@ -1809,26 +1789,30 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.0 - Chrome Extension Calling Added! 🎉✨`);
-    console.log(`[bridge] BB_BASE = ${BB_BASE}`);
+    console.log(`[bridge] VERSION 3.1 - Multi-Server Support! 🎉✨`);
+    console.log("");
+    console.log("📋 BlueBubbles Servers:");
+    for (const server of BLUEBUBBLES_SERVERS) {
+      console.log(`  • ${server.name} (${server.id})`);
+      console.log(`    URL: ${server.baseUrl}`);
+      console.log(`    Phone Numbers: ${server.phoneNumbers.length > 0 ? server.phoneNumbers.join(', ') : 'none configured yet'}`);
+    }
+    console.log("");
+    console.log(`[bridge] Total Phone Numbers: ${getAllPhoneNumbers().length}`);
     console.log(`[bridge] PARKING_NUMBER = ${ENV_PARKING_NUMBER || "(not set!)"}`);
     console.log(`[bridge] TIMEZONE = ${TIMEZONE}`);
     console.log(`[bridge] Conversation Provider ID = ${CONVERSATION_PROVIDER_ID}`);
     console.log("");
     console.log("📋 Features:");
+    console.log("  ✅ Multiple BlueBubbles servers");
+    console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
     console.log("  ✅ Photos & images (all directions)");
     console.log("  ✅ Files & documents (all directions)");
-    console.log("  ✅ GHL → Contact WITH attachments (reads from request body)!");
+    console.log("  ✅ Smart server routing");
     console.log("  ✅ Privacy filter (no auto-contact creation)");
     console.log("  ✅ Click-to-call (Chrome extension integration)");
     console.log("  ✅ Click-to-chat (Chrome extension integration)");
-    console.log("");
-    console.log("📋 Message Flow:");
-    console.log("  • Contact → You: Thread as iMessage with attachments");
-    console.log("  • You → Contact (iPhone): Thread as iMessage with attachments + header");
-    console.log("  • GHL → Contact: Delivered via BlueBubbles WITH ATTACHMENTS!");
-    console.log("  • Non-Contact: IGNORED (privacy filter)");
     console.log("");
     if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
     if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
