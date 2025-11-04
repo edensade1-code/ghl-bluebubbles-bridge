@@ -1,12 +1,13 @@
-// index.js - VERSION 3.6.5 (2025-11-03)
+// index.js - VERSION 3.6.6 (2025-11-03)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.5:
-// - ADDED: Tiffany to bb2 (Mac Mini) server
-// - Added iMessage number +19544450020 with parking number +19547587444
-// - Added GHL User ID BQAAlsqc9xdibpaxZP3q for Tiffany
-// - bb2 now handles 2 users (Mario and Tiffany)
+// CHANGELOG v3.6.6:
+// - FIXED: Bulletproof parking number routing using GHL conversation assignment
+// - Inbound messages now route based on conversation "assignedTo" userId
+// - Fetches active conversation from GHL to determine correct parking number
+// - Respects conversation reassignments automatically
+// - Each team member's conversations use their dedicated parking number
 // ============================================================================
 
 import express from "express";
@@ -721,6 +722,60 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 };
 
 /* -------------------------------------------------------------------------- */
+/* GHL Conversation Lookup - Get Assigned User's Parking Number              */
+/* -------------------------------------------------------------------------- */
+
+const getAssignedUserParkingNumber = async (locationId, contactId, fallbackServer) => {
+  try {
+    console.log("[conversation] fetching conversations for contact:", contactId);
+    
+    // Get conversations for this contact
+    const conversationsResponse = await withLcCall(locationId, (access) =>
+      axios.get(
+        `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
+        { headers: lcHeaders(access), timeout: 15000 }
+      )
+    );
+    
+    const conversations = conversationsResponse?.data?.conversations || [];
+    
+    if (conversations.length === 0) {
+      console.log("[conversation] no conversations found for contact, using fallback");
+      return fallbackServer.parkingNumbers[0].number;
+    }
+    
+    // Get the most recent conversation (they're usually sorted by updatedAt)
+    const activeConversation = conversations[0];
+    const assignedTo = activeConversation.assignedTo;
+    
+    if (!assignedTo) {
+      console.log("[conversation] no assigned user, using fallback");
+      return fallbackServer.parkingNumbers[0].number;
+    }
+    
+    console.log("[conversation] conversation assigned to userId:", assignedTo);
+    
+    // Find which parking number belongs to this userId
+    for (const server of BLUEBUBBLES_SERVERS) {
+      for (const parkingConfig of server.parkingNumbers) {
+        if (parkingConfig.userId === assignedTo) {
+          console.log(`[conversation] ✅ matched userId ${assignedTo} → ${parkingConfig.user} → parking ${parkingConfig.number}`);
+          return parkingConfig.number;
+        }
+      }
+    }
+    
+    console.log("[conversation] userId not found in parking map, using fallback");
+    return fallbackServer.parkingNumbers[0].number;
+    
+  } catch (e) {
+    console.error("[conversation] lookup failed:", e?.response?.status, e?.response?.data || e.message);
+    console.log("[conversation] using fallback parking number");
+    return fallbackServer.parkingNumbers[0].number;
+  }
+};
+
+/* -------------------------------------------------------------------------- */
 /* Attachment Handling                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -1344,14 +1399,16 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     const server = serverOverride || findServerForPhone(contactE164);
     console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
-    // Get the parking number for this specific server/iMessage number
-    const locationNumber = getParkingNumberForIMessage(contactE164);
+    // NEW v3.6.6: Get parking number based on GHL conversation assignment
+    // This ensures each team member's conversations use their dedicated parking number
+    const locationNumber = await getAssignedUserParkingNumber(locationId, contactId, server);
+    
     if (!locationNumber) {
       console.error(`[inbound] PARKING NUMBER NOT SET for ${server.name}`);
       return res.status(200).json({ ok: true, note: "no-parking-number" });
     }
 
-    console.log(`[inbound] using parking number ${locationNumber} for ${server.name}`);
+    console.log(`[inbound] using parking number ${locationNumber} for ${server.name} (based on conversation assignment)`);
 
     const key = dedupeKey({ text: messageText, from: contactE164, chatGuid });
     if (isRecentInbound(key)) {
@@ -1586,7 +1643,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.6.5",
+    version: "3.6.6",
     mode: "single-provider-multi-server-routing",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -1603,6 +1660,7 @@ app.get("/", (_req, res) => {
     features: {
       multiServer: true,
       userAssignment: true,
+      conversationAssignmentRouting: true,
       dedicatedParkingNumbers: true,
       envConfigurableParkingNumbers: true,
       singleProviderRouting: true,
@@ -1870,7 +1928,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.6.5</div>
+        <div class="powered-by">Powered by Eden Bridge v3.6.6</div>
       </div>
       
       <script>
@@ -2019,7 +2077,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.6.5</div>
+        <div class="powered-by">Powered by Eden Bridge v3.6.6</div>
       </div>
     </body>
     </html>
@@ -2047,7 +2105,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.5 - Tiffany Added to bb2! 🎉✨`);
+    console.log(`[bridge] VERSION 3.6.6 - Bulletproof Conversation Assignment Routing! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -2077,6 +2135,7 @@ app.post("/call-initiated", async (req, res) => {
     console.log("  ✅ Multiple BlueBubbles servers");
     console.log("  ✅ Single conversation provider (like SendBlue)");
     console.log("  ✅ Routes by GHL userId (most reliable!)");
+    console.log("  ✅ Conversation assignment routing (bulletproof!)");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
