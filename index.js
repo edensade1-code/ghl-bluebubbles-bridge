@@ -1,13 +1,13 @@
-// index.js - VERSION 3.6.6 (2025-11-03)
+// index.js - VERSION 3.6.7 (2025-11-03)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.6:
-// - FIXED: Bulletproof parking number routing using GHL conversation assignment
-// - Inbound messages now route based on conversation "assignedTo" userId
-// - Fetches active conversation from GHL to determine correct parking number
-// - Respects conversation reassignments automatically
-// - Each team member's conversations use their dedicated parking number
+// CHANGELOG v3.6.7:
+// - ADDED: Private API support for per-message account selection
+// - Can now send from specific iMessage accounts (Mario vs Tiffany)
+// - Uses "private-api" method instead of "apple-script" when enabled
+// - Automatically selects correct sending account based on GHL userId
+// - Requires Private API enabled on BlueBubbles server
 // ============================================================================
 
 import express from "express";
@@ -273,6 +273,25 @@ function getAllParkingNumbers() {
     }
   }
   return allParking;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Get iMessage Account for User (Private API Support)                       */
+/* -------------------------------------------------------------------------- */
+
+// NEW v3.6.7: Get the iMessage account number to send from based on userId
+function getIMessageAccountForUser(userId, server) {
+  // Find which phone configuration matches this userId
+  for (const phoneConfig of server.phoneNumbers) {
+    if (phoneConfig.userId === userId) {
+      console.log(`[private-api] userId ${userId} → send from ${phoneConfig.number} (${phoneConfig.user})`);
+      return phoneConfig.number;
+    }
+  }
+  
+  // Fallback to first phone number on this server
+  console.log(`[private-api] userId ${userId} not found, using default ${server.phoneNumbers[0].number}`);
+  return server.phoneNumbers[0].number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1184,6 +1203,11 @@ const handleProviderSend = async (req, res) => {
 
     const chatGuid = chatGuidForPhone(e164);
 
+    // NEW v3.6.7: Determine which iMessage account to send from (Private API)
+    const sendFromAccount = userId ? getIMessageAccountForUser(userId, server) : server.phoneNumbers[0].number;
+    
+    console.log(`[provider] sending from iMessage account: ${sendFromAccount}`);
+
     // NEW v3.6.2: Send text message only if there's text content
     let textMessageSent = false;
     let data = null;
@@ -1192,7 +1216,8 @@ const handleProviderSend = async (req, res) => {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
         message: String(message),
-        method: "apple-script",
+        method: "private-api",  // Changed from "apple-script" to "private-api"
+        selectedMessageGuid: sendFromAccount,  // NEW v3.6.7: Specify sending account
       };
       
       data = await bbPost(server, "/api/v1/message/text", payload);
@@ -1643,8 +1668,8 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.6.6",
-    mode: "single-provider-multi-server-routing",
+    version: "3.6.7",
+    mode: "single-provider-multi-server-routing-private-api",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
@@ -1661,6 +1686,8 @@ app.get("/", (_req, res) => {
       multiServer: true,
       userAssignment: true,
       conversationAssignmentRouting: true,
+      privateAPI: true,
+      perMessageAccountSelection: true,
       dedicatedParkingNumbers: true,
       envConfigurableParkingNumbers: true,
       singleProviderRouting: true,
@@ -2105,7 +2132,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.6 - Bulletproof Conversation Assignment Routing! 🎯✨`);
+    console.log(`[bridge] VERSION 3.6.7 - Private API Enabled with Account Selection! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -2136,6 +2163,7 @@ app.post("/call-initiated", async (req, res) => {
     console.log("  ✅ Single conversation provider (like SendBlue)");
     console.log("  ✅ Routes by GHL userId (most reliable!)");
     console.log("  ✅ Conversation assignment routing (bulletproof!)");
+    console.log("  ✅ Private API with per-message account selection");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
