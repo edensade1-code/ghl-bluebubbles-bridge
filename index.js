@@ -1,13 +1,12 @@
-// index.js - VERSION 3.6.7 (2025-11-03)
+// index.js - VERSION 3.6.8 (2025-11-04)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.7:
-// - ADDED: Private API support for per-message account selection
-// - Can now send from specific iMessage accounts (Mario vs Tiffany)
-// - Uses "private-api" method instead of "apple-script" when enabled
-// - Automatically selects correct sending account based on GHL userId
-// - Requires Private API enabled on BlueBubbles server
+// CHANGELOG v3.6.8:
+// - FIXED: contactId initialization bug in inbound handler
+// - FIXED: Removed incorrect selectedMessageGuid parameter  
+// - Private API uses chatGuid format to determine sending account
+// - ChatGuid format: "iMessage;-;+ContactNumber;-;+SendingAccount"
 // ============================================================================
 
 import express from "express";
@@ -1201,12 +1200,21 @@ const handleProviderSend = async (req, res) => {
     
     console.log(`[provider] routing to ${server.name} for ${e164}`);
 
-    const chatGuid = chatGuidForPhone(e164);
-
-    // NEW v3.6.7: Determine which iMessage account to send from (Private API)
+    // NEW v3.6.7/3.6.8: For Private API, create chatGuid that includes the sending account
+    // Format: "iMessage;-;+ContactNumber;-;+SendingAccount"
     const sendFromAccount = userId ? getIMessageAccountForUser(userId, server) : server.phoneNumbers[0].number;
-    
     console.log(`[provider] sending from iMessage account: ${sendFromAccount}`);
+    
+    // Create chatGuid - for Private API this specifies both recipient and sender
+    let chatGuid;
+    if (sendFromAccount) {
+      // Private API format with sending account specified
+      chatGuid = `iMessage;-;${e164};-;${sendFromAccount}`;
+      console.log(`[provider] using Private API chatGuid: ${chatGuid}`);
+    } else {
+      // Fallback to simple format
+      chatGuid = chatGuidForPhone(e164);
+    }
 
     // NEW v3.6.2: Send text message only if there's text content
     let textMessageSent = false;
@@ -1216,8 +1224,7 @@ const handleProviderSend = async (req, res) => {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
         message: String(message),
-        method: "private-api",  // Changed from "apple-script" to "private-api"
-        selectedMessageGuid: sendFromAccount,  // NEW v3.6.7: Specify sending account
+        method: "private-api",  // Using Private API
       };
       
       data = await bbPost(server, "/api/v1/message/text", payload);
@@ -1424,6 +1431,21 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     const server = serverOverride || findServerForPhone(contactE164);
     console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
+    // Find the contact in GHL
+    const contactId = await findContactIdByPhone(locationId, contactE164);
+    if (!contactId) {
+      console.log(`[inbound] CONTACT NOT FOUND IN GHL - ignoring message:`, {
+        locationId,
+        phone: contactE164,
+        isFromMe,
+        messagePreview: messageText?.slice(0, 50),
+        hasAttachments,
+        server: server.name,
+        parkingNumber: server.parkingNumbers[0]?.number
+      });
+      return res.status(200).json({ ok: true, note: "no-contact" });
+    }
+
     // NEW v3.6.6: Get parking number based on GHL conversation assignment
     // This ensures each team member's conversations use their dedicated parking number
     const locationNumber = await getAssignedUserParkingNumber(locationId, contactId, server);
@@ -1441,20 +1463,6 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       return res.status(200).json({ ok: true, ignored: "duplicate" });
     }
     rememberInbound(key);
-
-    const contactId = await findContactIdByPhone(locationId, contactE164);
-    if (!contactId) {
-      console.log("[inbound] CONTACT NOT FOUND IN GHL - ignoring message:", { 
-        locationId, 
-        phone: contactE164,
-        isFromMe,
-        messagePreview: messageText?.slice(0, 30),
-        hasAttachments,
-        server: server.name,
-        parkingNumber: locationNumber,
-      });
-      return res.status(200).json({ ok: true, dropped: "no-contact", reason: "privacy-filter" });
-    }
 
     const accessToken = await getValidAccessToken(locationId);
     if (!accessToken) {
@@ -1668,7 +1676,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.6.7",
+    version: "3.6.8",
     mode: "single-provider-multi-server-routing-private-api",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2132,7 +2140,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.7 - Private API Enabled with Account Selection! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.6.8 - Private API Fixed with Proper ChatGuid! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
