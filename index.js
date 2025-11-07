@@ -1,12 +1,14 @@
-// index.js - VERSION 3.6.8 (2025-11-04)
+// index.js - VERSION 3.7.0 (2025-11-06)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
-// CHANGELOG v3.6.8:
-// - FIXED: contactId initialization bug in inbound handler
-// - FIXED: Removed incorrect selectedMessageGuid parameter  
-// - Private API uses chatGuid format to determine sending account
-// - ChatGuid format: "iMessage;-;+ContactNumber;-;+SendingAccount"
+// CHANGELOG v3.7.0:
+// - ADDED: bb3 server for Tiffany's dedicated Mac Mini
+// - CHANGED: bb2 now only handles Mario (removed Tiffany from bb2)
+// - CHANGED: Tiffany moved from bb2 to dedicated bb3 server
+// - FIXED: Corrected passwords - removed exclamation mark (now "EdenBridge2025")
+// - VERIFIED: Full 3-server architecture (bb1=Eden, bb2=Mario, bb3=Tiffany)
+// - Each user now has dedicated Mac Mini and iPhone for 24/7 operation
 // ============================================================================
 
 import express from "express";
@@ -82,7 +84,7 @@ const GHL_USER_ID_TIFFANY = "BQAAlsqc9xdibpaxZP3q";
 /* Config - BlueBubbles Servers with Parking Numbers from Env Vars            */
 /* -------------------------------------------------------------------------- */
 // Define your BlueBubbles servers here
-// Each server can handle multiple phone numbers and has its own parking number
+// NEW v3.7.0: Each user now has dedicated server (bb1=Eden, bb2=Mario, bb3=Tiffany)
 const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
@@ -99,16 +101,27 @@ const BLUEBUBBLES_SERVERS = [
   },
   {
     id: "bb2",
-    name: "Server 2 (Mac Mini - Mario & Tiffany)",
+    name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
-    password: process.env.BB2_GUID || "EdenBridge2025!",
+    password: process.env.BB2_GUID || "EdenBridge2025",
     parkingNumbers: [
       { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
-      { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
     ],
     // iMessage phone numbers handled by this server
     phoneNumbers: [
       { number: "+13059273268", parkingNumber: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
+    ],
+  },
+  {
+    id: "bb3",
+    name: "Server 3 (Mac Mini - Tiffany)",
+    baseUrl: "https://bb3.asapcashhomebuyers.com",
+    password: process.env.BB3_GUID || "EdenBridge2025",
+    parkingNumbers: [
+      { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
+    ],
+    // iMessage phone numbers handled by this server
+    phoneNumbers: [
       { number: "+19544450020", parkingNumber: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
     ],
   },
@@ -177,7 +190,7 @@ const TIMEZONE = (process.env.TIMEZONE || "America/New_York").trim();
 /* BlueBubbles Server Routing                                                 */
 /* -------------------------------------------------------------------------- */
 
-// NEW v3.5: Find server by GHL userId
+// Find server by GHL userId
 function findServerByUserId(userId) {
   const server = USERID_TO_SERVER_MAP[userId];
   
@@ -190,7 +203,7 @@ function findServerByUserId(userId) {
   return BLUEBUBBLES_SERVERS[0];
 }
 
-// NEW: Find server by parking number (from GHL 'from' field)
+// Find server by parking number (from GHL 'from' field)
 function findServerByParkingNumber(parkingE164) {
   const normalized = toE164US(parkingE164);
   const server = PARKING_TO_SERVER_MAP[normalized];
@@ -278,7 +291,7 @@ function getAllParkingNumbers() {
 /* Get iMessage Account for User (Private API Support)                       */
 /* -------------------------------------------------------------------------- */
 
-// NEW v3.6.7: Get the iMessage account number to send from based on userId
+// Get the iMessage account number to send from based on userId
 function getIMessageAccountForUser(userId, server) {
   // Find which phone configuration matches this userId
   for (const phoneConfig of server.phoneNumbers) {
@@ -314,7 +327,6 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
   const expiry = Date.now() + OUTBOUND_TTL_MS;
   recentOutboundMessages.set(key, expiry);
   
-  // NEW v3.6.1: Also remember by text+from for updated-message events that don't have chatGuid
   const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
   recentOutboundMessages.set(textOnlyKey, expiry);
   
@@ -341,7 +353,6 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
 };
 
 const isOurOutbound = (text, chatGuid, hasAttachments) => {
-  // Check with chatGuid first
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
   if (expiry && expiry >= Date.now()) {
@@ -352,7 +363,6 @@ const isOurOutbound = (text, chatGuid, hasAttachments) => {
     recentOutboundMessages.delete(key);
   }
   
-  // NEW v3.6.1: Also check by text only (for updated-message events without chatGuid)
   const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
   const textOnlyExpiry = recentOutboundMessages.get(textOnlyKey);
   if (textOnlyExpiry && textOnlyExpiry >= Date.now()) {
@@ -509,7 +519,6 @@ const chatGuidForPhone = (e164) => `iMessage;-;${e164}`;
 const bbPost = async (server, path, body) => {
   const url = `${server.baseUrl}${path}?guid=${encodeURIComponent(server.password)}`;
   
-  // DEBUG: Log the password and URL (sanitized)
   console.log(`[bbPost][${server.id}] password length: ${server.password?.length || 0}`);
   console.log(`[bbPost][${server.id}] password starts with: ${server.password?.substring(0, 10)}...`);
   console.log(`[bbPost][${server.id}] calling URL: ${server.baseUrl}${path}?guid=[REDACTED]`);
@@ -747,7 +756,6 @@ const getAssignedUserParkingNumber = async (locationId, contactId, fallbackServe
   try {
     console.log("[conversation] fetching conversations for contact:", contactId);
     
-    // Get conversations for this contact
     const conversationsResponse = await withLcCall(locationId, (access) =>
       axios.get(
         `${LC_API}/conversations/search?locationId=${encodeURIComponent(locationId)}&contactId=${encodeURIComponent(contactId)}`,
@@ -762,7 +770,6 @@ const getAssignedUserParkingNumber = async (locationId, contactId, fallbackServe
       return fallbackServer.parkingNumbers[0].number;
     }
     
-    // Get the most recent conversation (they're usually sorted by updatedAt)
     const activeConversation = conversations[0];
     const assignedTo = activeConversation.assignedTo;
     
@@ -773,7 +780,6 @@ const getAssignedUserParkingNumber = async (locationId, contactId, fallbackServe
     
     console.log("[conversation] conversation assigned to userId:", assignedTo);
     
-    // Find which parking number belongs to this userId
     for (const server of BLUEBUBBLES_SERVERS) {
       for (const parkingConfig of server.parkingNumbers) {
         if (parkingConfig.userId === assignedTo) {
@@ -888,10 +894,8 @@ async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) 
     
     const form = new FormData();
     
-    // NEW v3.6.2: Try to use a more compatible mime type for GHL
     let uploadMimeType = mimeType || 'application/octet-stream';
     
-    // GHL might be picky about mime types - try common ones
     if (uploadMimeType === 'image/png' || filename.toLowerCase().endsWith('.png')) {
       uploadMimeType = 'image/png';
     } else if (uploadMimeType === 'image/jpeg' || uploadMimeType === 'image/jpg' || 
@@ -927,7 +931,6 @@ async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) 
   } catch (e) {
     console.error("[attachment] upload failed:", e?.response?.status, e?.response?.data || e.message);
     
-    // NEW v3.6.2: If GHL rejects the file, try alternative approaches
     if (e?.response?.status === 400 && e?.response?.data?.message === 'Invalid File Type') {
       console.log("[attachment] GHL rejected file type, this file type may not be supported by GHL");
     }
@@ -1097,7 +1100,6 @@ function extractToFromAndMessage(rawBody = {}) {
   }
   if (!body || typeof body !== "object") body = {};
 
-  // Extract 'to' field
   const to =
     body.to ||
     body.toNumber ||
@@ -1108,7 +1110,6 @@ function extractToFromAndMessage(rawBody = {}) {
     body.destination ||
     null;
 
-  // Extract 'from' field (parking number from GHL)
   const from =
     body.from ||
     body.fromNumber ||
@@ -1117,7 +1118,6 @@ function extractToFromAndMessage(rawBody = {}) {
     body.parkingNumber ||
     null;
 
-  // NEW v3.5: Extract userId field from GHL
   const userId = body.userId || body.user_id || body.userID || null;
 
   const message =
@@ -1136,7 +1136,6 @@ const handleProviderSend = async (req, res) => {
       return res.status(401).json({ status: "error", error: "Unauthorized" });
     }
 
-    // NEW v3.4.1: Log the ENTIRE request body to see what GHL sends
     console.log("[provider] ========== FULL REQUEST BODY ==========");
     console.log(JSON.stringify(req.body, null, 2));
     console.log("[provider] ========== QUERY PARAMS ==========");
@@ -1158,7 +1157,7 @@ const handleProviderSend = async (req, res) => {
     console.log("[provider] EXTRACTED VALUES:", { 
       to, 
       from,
-      userId, // NEW: Log userId
+      userId,
       messagePreview: message?.slice(0, 50),
       attachmentsInBody: attachmentsFromBody.length 
     });
@@ -1172,15 +1171,10 @@ const handleProviderSend = async (req, res) => {
       return res.status(400).json({ ok: false, error: err.message });
     }
     
-    // NEW v3.6.2: Allow attachments without message text
     if ((!message || !String(message).trim()) && attachmentsFromBody.length === 0) {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message' or attachments" });
     }
 
-    // NEW v3.5: Find which server to use - priority order:
-    // 1. userId (most reliable)
-    // 2. from field (parking number)
-    // 3. to field (fallback)
     let server;
     let routedBy = "unknown";
     
@@ -1200,23 +1194,17 @@ const handleProviderSend = async (req, res) => {
     
     console.log(`[provider] routing to ${server.name} for ${e164}`);
 
-    // NEW v3.6.7/3.6.8: For Private API, create chatGuid that includes the sending account
-    // Format: "iMessage;-;+ContactNumber;-;+SendingAccount"
     const sendFromAccount = userId ? getIMessageAccountForUser(userId, server) : server.phoneNumbers[0].number;
     console.log(`[provider] sending from iMessage account: ${sendFromAccount}`);
     
-    // Create chatGuid - for Private API this specifies both recipient and sender
     let chatGuid;
     if (sendFromAccount) {
-      // Private API format with sending account specified
       chatGuid = `iMessage;-;${e164};-;${sendFromAccount}`;
       console.log(`[provider] using Private API chatGuid: ${chatGuid}`);
     } else {
-      // Fallback to simple format
       chatGuid = chatGuidForPhone(e164);
     }
 
-    // NEW v3.6.2: Send text message only if there's text content
     let textMessageSent = false;
     let data = null;
     if (message && String(message).trim()) {
@@ -1224,21 +1212,18 @@ const handleProviderSend = async (req, res) => {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
         message: String(message),
-        method: "private-api",  // Using Private API
+        method: "private-api",
       };
       
       data = await bbPost(server, "/api/v1/message/text", payload);
       textMessageSent = true;
 
-      // Remember this message BEFORE sending attachments
       rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
     } else {
       console.log("[provider] no text message, sending attachments only");
-      // For attachment-only messages, remember the chatGuid with a marker
       rememberOutbound("", chatGuid, true);
     }
 
-    // Process attachments from request body
     let successfulAttachments = 0;
     if (attachmentsFromBody.length > 0) {
       console.log(`[provider] sending ${attachmentsFromBody.length} attachment(s) to ${server.name}`);
@@ -1328,7 +1313,6 @@ app.post("/send", handleProviderSend);
 /* Inbound Webhook - BlueBubbles → Bridge → GHL (Multi-Server)               */
 /* -------------------------------------------------------------------------- */
 
-// Generic webhook handler function
 async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
   try {
     if (verifyBearer(req)) return res.status(200).json({ ok: true });
@@ -1426,12 +1410,9 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       return res.status(200).json({ ok: true, note: "bad-contact-number" });
     }
 
-    // NEW v3.6: Use the server that was passed in (from specific webhook endpoint)
-    // or fall back to auto-detection
     const server = serverOverride || findServerForPhone(contactE164);
     console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
-    // Find the contact in GHL
     const contactId = await findContactIdByPhone(locationId, contactE164);
     if (!contactId) {
       console.log(`[inbound] CONTACT NOT FOUND IN GHL - ignoring message:`, {
@@ -1446,8 +1427,6 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       return res.status(200).json({ ok: true, note: "no-contact" });
     }
 
-    // NEW v3.6.6: Get parking number based on GHL conversation assignment
-    // This ensures each team member's conversations use their dedicated parking number
     const locationNumber = await getAssignedUserParkingNumber(locationId, contactId, server);
     
     if (!locationNumber) {
@@ -1542,24 +1521,26 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
   }
 }
 
-// NEW v3.6: Specific webhook endpoints for each server
 app.post("/webhook/bluebubbles/bb1", async (req, res) => {
   console.log("[webhook] bb1 (Eden's Mac) endpoint called");
-  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[0]); // Force bb1
+  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[0]);
 });
 
 app.post("/webhook/bluebubbles/bb2", async (req, res) => {
-  console.log("[webhook] bb2 (Mac Mini - Mario & Tiffany) endpoint called");
-  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[1]); // Force bb2
+  console.log("[webhook] bb2 (Mario's Mac Mini) endpoint called");
+  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[1]);
 });
 
-// Generic endpoint - auto-detects server (fallback)
+app.post("/webhook/bluebubbles/bb3", async (req, res) => {
+  console.log("[webhook] bb3 (Tiffany's Mac Mini) endpoint called");
+  return handleBlueBubblesWebhook(req, res, BLUEBUBBLES_SERVERS[2]);
+});
+
 app.post("/webhook/bluebubbles", async (req, res) => {
   console.log("[webhook] generic endpoint called, auto-detecting server...");
   return handleBlueBubblesWebhook(req, res, null);
 });
 
-// Legacy webhook endpoint - redirects to generic
 app.post("/webhook", async (req, res) => {
   console.log("[webhook] legacy /webhook endpoint called, processing...");
   return handleBlueBubblesWebhook(req, res, null);
@@ -1676,7 +1657,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.6.8",
+    version: "3.7.0",
     mode: "single-provider-multi-server-routing-private-api",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -1692,6 +1673,8 @@ app.get("/", (_req, res) => {
     conversationProviderId: CONVERSATION_PROVIDER_ID,
     features: {
       multiServer: true,
+      threeServers: true,
+      dedicatedServersPerUser: true,
       userAssignment: true,
       conversationAssignmentRouting: true,
       privateAPI: true,
@@ -1724,13 +1707,13 @@ app.get("/", (_req, res) => {
       "Mario": {
         parkingNumber: PARKING_NUMBER_MARIO,
         iMessageNumber: "+13059273268",
-        server: "bb2 (Mac Mini)",
+        server: "bb2 (Mac Mini #1)",
         envVar: "PARKING_NUMBER_MARIO"
       },
       "Tiffany": {
         parkingNumber: PARKING_NUMBER_TIFFANY,
         iMessageNumber: "+19544450020",
-        server: "bb2 (Mac Mini)",
+        server: "bb3 (Mac Mini #2)",
         envVar: "PARKING_NUMBER_TIFFANY"
       }
     }
@@ -1963,7 +1946,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.6.6</div>
+        <div class="powered-by">Powered by Eden Bridge v3.7.0</div>
       </div>
       
       <script>
@@ -2112,7 +2095,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.6.6</div>
+        <div class="powered-by">Powered by Eden Bridge v3.7.0</div>
       </div>
     </body>
     </html>
@@ -2140,7 +2123,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.6.8 - Private API Fixed with Proper ChatGuid! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.0 - Three-Server Architecture Complete! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -2164,16 +2147,16 @@ app.post("/call-initiated", async (req, res) => {
     console.log(`  Mario (env: PARKING_NUMBER_MARIO):`);
     console.log(`    Parking: ${PARKING_NUMBER_MARIO} → iMessage: +13059273268 → Server: bb2`);
     console.log(`  Tiffany (env: PARKING_NUMBER_TIFFANY):`);
-    console.log(`    Parking: ${PARKING_NUMBER_TIFFANY} → iMessage: +19544450020 → Server: bb2`);
+    console.log(`    Parking: ${PARKING_NUMBER_TIFFANY} → iMessage: +19544450020 → Server: bb3`);
     console.log("");
     console.log("📋 Features:");
-    console.log("  ✅ Multiple BlueBubbles servers");
+    console.log("  ✅ Three dedicated BlueBubbles servers (bb1, bb2, bb3)");
+    console.log("  ✅ Each user has dedicated Mac Mini + iPhone");
     console.log("  ✅ Single conversation provider (like SendBlue)");
     console.log("  ✅ Routes by GHL userId (most reliable!)");
     console.log("  ✅ Conversation assignment routing (bulletproof!)");
     console.log("  ✅ Private API with per-message account selection");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
-    console.log("  ✅ User assignment per phone number");
     console.log("  ✅ Text messages (all directions)");
     console.log("  ✅ Photos & images (all directions)");
     console.log("  ✅ Files & documents (all directions)");
