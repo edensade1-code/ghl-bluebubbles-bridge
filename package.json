@@ -1,9 +1,9 @@
 {
   "name": "ghl-bluebubbles-bridge",
-  "version": "1.3.0",
+  "version": "3.7.1",
   "private": true,
   "type": "module",
-  "description": "Tiny bridge that exposes simple endpoints and forwards to BlueBubbles relay",
+  "description": "Multi-server BlueBubbles bridge with optional Private API support - connects GHL to iMessage via dedicated Mac servers",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -19,11 +19,22 @@
     "compression": "^1.7.4",
     "cors": "^2.8.5",
     "express": "^4.21.1",
+    "form-data": "^4.0.0",
     "helmet": "^7.1.0",
     "morgan": "^1.10.0"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
     "nodemon": "^3.1.4"
-  }
+  },
+  "keywords": [
+    "bluebubbles",
+    "gohighlevel",
+    "imessage",
+    "bridge",
+    "multi-server",
+    "private-api",
+    "real-estate",
+    "crm-integration"
+  ]
 }
