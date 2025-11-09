@@ -1,6 +1,12 @@
-// index.js - VERSION 3.7.0 (2025-11-06)
+// index.js - VERSION 3.7.1 (2025-11-07)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.1:
+// - FIXED: Made Private API optional per server (usePrivateAPI flag)
+// - CHANGED: method now respects server.usePrivateAPI instead of hardcoded "private-api"
+// - All servers default to usePrivateAPI: false (AppleScript mode)
+// - Can enable Private API per server by setting usePrivateAPI: true
 // ============================================================================
 // CHANGELOG v3.7.0:
 // - ADDED: bb3 server for Tiffany's dedicated Mac Mini
@@ -85,12 +91,14 @@ const GHL_USER_ID_TIFFANY = "BQAAlsqc9xdibpaxZP3q";
 /* -------------------------------------------------------------------------- */
 // Define your BlueBubbles servers here
 // NEW v3.7.0: Each user now has dedicated server (bb1=Eden, bb2=Mario, bb3=Tiffany)
+// NEW v3.7.1: Added usePrivateAPI flag - set to true ONLY when Private API is enabled
 const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
     name: "Server 1 (Original Mac - Eden)",
     baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
+    usePrivateAPI: false,  // ← Private API not enabled on bb1
     parkingNumbers: [
       { number: PARKING_NUMBER_EDEN, userId: GHL_USER_ID_EDEN, user: "Eden" },
     ],
@@ -104,6 +112,7 @@ const BLUEBUBBLES_SERVERS = [
     name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025",
+    usePrivateAPI: false,  // ← Set to true when Private API is ready on bb2
     parkingNumbers: [
       { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
     ],
@@ -117,6 +126,7 @@ const BLUEBUBBLES_SERVERS = [
     name: "Server 3 (Mac Mini - Tiffany)",
     baseUrl: "https://bb3.asapcashhomebuyers.com",
     password: process.env.BB3_GUID || "EdenBridge2025",
+    usePrivateAPI: false,  // ← Set to true when Private API is ready on bb3
     parkingNumbers: [
       { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
     ],
@@ -1194,15 +1204,21 @@ const handleProviderSend = async (req, res) => {
     
     console.log(`[provider] routing to ${server.name} for ${e164}`);
 
-    const sendFromAccount = userId ? getIMessageAccountForUser(userId, server) : server.phoneNumbers[0].number;
-    console.log(`[provider] sending from iMessage account: ${sendFromAccount}`);
-    
+    // ========================================================================
+    // V3.7.1 FIX: Use server.usePrivateAPI flag to determine method
+    // ========================================================================
     let chatGuid;
-    if (sendFromAccount) {
+    let sendFromAccount = null;
+    
+    if (server.usePrivateAPI && userId) {
+      // Private API enabled - use dedicated account
+      sendFromAccount = getIMessageAccountForUser(userId, server);
       chatGuid = `iMessage;-;${e164};-;${sendFromAccount}`;
-      console.log(`[provider] using Private API chatGuid: ${chatGuid}`);
+      console.log(`[provider] Private API enabled - using account: ${sendFromAccount}`);
     } else {
+      // AppleScript mode - simple chatGuid
       chatGuid = chatGuidForPhone(e164);
+      console.log(`[provider] AppleScript mode - using simple chatGuid`);
     }
 
     let textMessageSent = false;
@@ -1212,8 +1228,10 @@ const handleProviderSend = async (req, res) => {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
         message: String(message),
-        method: "private-api",
+        method: server.usePrivateAPI ? "private-api" : "apple-script",  // ← THE FIX!
       };
+      
+      console.log(`[provider] sending with method: ${payload.method}`);
       
       data = await bbPost(server, "/api/v1/message/text", payload);
       textMessageSent = true;
@@ -1288,6 +1306,7 @@ const handleProviderSend = async (req, res) => {
       relay: server.baseUrl,
       server: server.name,
       routedBy: routedBy,
+      method: server.usePrivateAPI ? "private-api" : "apple-script",
       messageId: textMessageSent ? (data?.guid || data?.data?.guid || `msg-${newTempGuid()}`) : `attachment-${newTempGuid()}`,
       id: textMessageSent ? (data?.guid || data?.data?.guid || `msg-${newTempGuid()}`) : `attachment-${newTempGuid()}`,
       attachmentCount: successfulAttachments,
@@ -1645,6 +1664,7 @@ app.get("/oauth/debug", (_req, res) => {
       parkingNumbers: s.parkingNumbers,
       phoneCount: s.phoneNumbers.length,
       phoneNumbers: s.phoneNumbers,
+      usePrivateAPI: s.usePrivateAPI,
     })),
   });
 });
@@ -1657,8 +1677,8 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.0",
-    mode: "single-provider-multi-server-routing-private-api",
+    version: "3.7.1",
+    mode: "single-provider-multi-server-routing-optional-private-api",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
@@ -1666,6 +1686,7 @@ app.get("/", (_req, res) => {
       users: s.parkingNumbers.map(p => p.user),
       parkingNumbers: s.parkingNumbers.map(p => p.number),
       phoneNumbers: s.phoneNumbers.map(p => ({ number: p.number, user: p.user })),
+      usePrivateAPI: s.usePrivateAPI,
     })),
     totalPhoneNumbers: getAllPhoneNumbers().length,
     totalParkingNumbers: getAllParkingNumbers().length,
@@ -1677,7 +1698,7 @@ app.get("/", (_req, res) => {
       dedicatedServersPerUser: true,
       userAssignment: true,
       conversationAssignmentRouting: true,
-      privateAPI: true,
+      privateAPI: "optional-per-server",
       perMessageAccountSelection: true,
       dedicatedParkingNumbers: true,
       envConfigurableParkingNumbers: true,
@@ -1702,19 +1723,22 @@ app.get("/", (_req, res) => {
         parkingNumber: PARKING_NUMBER_EDEN,
         iMessageNumber: "+13058337256",
         server: "bb1 (Original Mac)",
-        envVar: "PARKING_NUMBER_EDEN"
+        envVar: "PARKING_NUMBER_EDEN",
+        usePrivateAPI: BLUEBUBBLES_SERVERS[0].usePrivateAPI
       },
       "Mario": {
         parkingNumber: PARKING_NUMBER_MARIO,
         iMessageNumber: "+13059273268",
         server: "bb2 (Mac Mini #1)",
-        envVar: "PARKING_NUMBER_MARIO"
+        envVar: "PARKING_NUMBER_MARIO",
+        usePrivateAPI: BLUEBUBBLES_SERVERS[1].usePrivateAPI
       },
       "Tiffany": {
         parkingNumber: PARKING_NUMBER_TIFFANY,
         iMessageNumber: "+19544450020",
         server: "bb3 (Mac Mini #2)",
-        envVar: "PARKING_NUMBER_TIFFANY"
+        envVar: "PARKING_NUMBER_TIFFANY",
+        usePrivateAPI: BLUEBUBBLES_SERVERS[2].usePrivateAPI
       }
     }
   });
@@ -1735,6 +1759,7 @@ app.get("/health", async (_req, res) => {
         baseUrl: server.baseUrl,
         users: server.parkingNumbers.map(p => p.user),
         parkingNumbers: server.parkingNumbers.map(p => p.number),
+        usePrivateAPI: server.usePrivateAPI,
         status: "online",
         ping: pong.data ?? null,
       });
@@ -1745,6 +1770,7 @@ app.get("/health", async (_req, res) => {
         baseUrl: server.baseUrl,
         users: server.parkingNumbers.map(p => p.user),
         parkingNumbers: server.parkingNumbers.map(p => p.number),
+        usePrivateAPI: server.usePrivateAPI,
         status: "offline",
         error: e?.response?.data ?? e?.message ?? "Ping failed",
       });
@@ -1946,7 +1972,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.7.0</div>
+        <div class="powered-by">Powered by Eden Bridge v3.7.1</div>
       </div>
       
       <script>
@@ -2095,7 +2121,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.7.0</div>
+        <div class="powered-by">Powered by Eden Bridge v3.7.1</div>
       </div>
     </body>
     </html>
@@ -2123,7 +2149,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.0 - Three-Server Architecture Complete! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.1 - Optional Private API Support! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -2133,6 +2159,7 @@ app.post("/call-initiated", async (req, res) => {
       console.log(`    Parking Numbers: ${server.parkingNumbers.map(p => p.number).join(', ')}`);
       const phoneList = server.phoneNumbers.map(p => `${p.number} (${p.user})`).join(', ');
       console.log(`    iMessage Numbers: ${phoneList}`);
+      console.log(`    Private API: ${server.usePrivateAPI ? 'ENABLED ✅' : 'DISABLED (AppleScript mode)'}`);
       console.log(`    Webhook URL: https://ieden-bluebubbles-bridge-1.onrender.com/webhook/bluebubbles/${server.id}`);
       console.log("");
     }
@@ -2143,11 +2170,11 @@ app.post("/call-initiated", async (req, res) => {
     console.log("");
     console.log("📋 Routing Configuration:");
     console.log(`  Eden (env: PARKING_NUMBER_EDEN):`);
-    console.log(`    Parking: ${PARKING_NUMBER_EDEN} → iMessage: +13058337256 → Server: bb1`);
+    console.log(`    Parking: ${PARKING_NUMBER_EDEN} → iMessage: +13058337256 → Server: bb1 (Private API: ${BLUEBUBBLES_SERVERS[0].usePrivateAPI ? 'ON' : 'OFF'})`);
     console.log(`  Mario (env: PARKING_NUMBER_MARIO):`);
-    console.log(`    Parking: ${PARKING_NUMBER_MARIO} → iMessage: +13059273268 → Server: bb2`);
+    console.log(`    Parking: ${PARKING_NUMBER_MARIO} → iMessage: +13059273268 → Server: bb2 (Private API: ${BLUEBUBBLES_SERVERS[1].usePrivateAPI ? 'ON' : 'OFF'})`);
     console.log(`  Tiffany (env: PARKING_NUMBER_TIFFANY):`);
-    console.log(`    Parking: ${PARKING_NUMBER_TIFFANY} → iMessage: +19544450020 → Server: bb3`);
+    console.log(`    Parking: ${PARKING_NUMBER_TIFFANY} → iMessage: +19544450020 → Server: bb3 (Private API: ${BLUEBUBBLES_SERVERS[2].usePrivateAPI ? 'ON' : 'OFF'})`);
     console.log("");
     console.log("📋 Features:");
     console.log("  ✅ Three dedicated BlueBubbles servers (bb1, bb2, bb3)");
@@ -2155,7 +2182,8 @@ app.post("/call-initiated", async (req, res) => {
     console.log("  ✅ Single conversation provider (like SendBlue)");
     console.log("  ✅ Routes by GHL userId (most reliable!)");
     console.log("  ✅ Conversation assignment routing (bulletproof!)");
-    console.log("  ✅ Private API with per-message account selection");
+    console.log("  ✅ Optional Private API per server (NEW v3.7.1!)");
+    console.log("  ✅ AppleScript fallback when Private API disabled");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ Text messages (all directions)");
     console.log("  ✅ Photos & images (all directions)");
