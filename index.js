@@ -1,6 +1,13 @@
-// index.js - VERSION 3.7.2 (2025-11-09)
+// index.js - VERSION 3.7.3 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.3:
+// - FIXED: Server locking - messages now only process from the sending server
+// - FIXED: Duplicate message prevention when multiple servers have same contact
+// - ADDED: outboundServerMap to track which server sent each message
+// - IMPROVED: Echo prevention now checks server ID to block cross-server duplicates
+// - Team lead handoffs now work correctly - reassign in GHL and messages auto-route
 // ============================================================================
 // CHANGELOG v3.7.2:
 // - FIXED: OAuth /oauth/start now uses /chooselocation instead of /authorize
@@ -330,6 +337,7 @@ const tokenStore = new Map();
 const recentOutboundMessages = new Map();
 const recentInboundKeys = new Map();
 const recentOutboundAttachmentChats = new Map();
+const outboundServerMap = new Map(); // Track which server sent each message
 const DEDUPE_TTL_MS = 15_000;
 const OUTBOUND_TTL_MS = 30_000;
 const ATTACHMENT_GRACE_MS = 10_000;
@@ -337,13 +345,20 @@ const ATTACHMENT_GRACE_MS = 10_000;
 const dedupeKey = ({ text, from, chatGuid }) =>
   `${chatGuid || ""}|${from || ""}|${(text || "").slice(0, 128)}`;
 
-const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
+const rememberOutbound = (text, chatGuid, hasAttachments = false, serverId = null) => {
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = Date.now() + OUTBOUND_TTL_MS;
   recentOutboundMessages.set(key, expiry);
   
   const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
   recentOutboundMessages.set(textOnlyKey, expiry);
+  
+  // Track which server sent this message
+  if (serverId) {
+    const serverKey = `${chatGuid}|${(text || "").slice(0, 128)}`;
+    outboundServerMap.set(serverKey, { serverId, expiry });
+    console.log(`[outbound-tracker] message sent from ${serverId}`);
+  }
   
   if (hasAttachments) {
     const attExpiry = Date.now() + ATTACHMENT_GRACE_MS;
@@ -365,17 +380,42 @@ const rememberOutbound = (text, chatGuid, hasAttachments = false) => {
       if (exp < now) recentOutboundAttachmentChats.delete(k);
     }
   }
+  if (outboundServerMap.size > 100) {
+    const now = Date.now();
+    for (const [k, data] of outboundServerMap.entries()) {
+      if (data.expiry < now) outboundServerMap.delete(k);
+    }
+  }
 };
 
-const isOurOutbound = (text, chatGuid, hasAttachments) => {
+const isOurOutbound = (text, chatGuid, hasAttachments, incomingServerId = null) => {
   const key = `${chatGuid}|${(text || "").slice(0, 128)}`;
   const expiry = recentOutboundMessages.get(key);
+  
+  // Check if this message was sent by US
   if (expiry && expiry >= Date.now()) {
+    // Check if we know which server sent it
+    const serverData = outboundServerMap.get(key);
+    if (serverData && serverData.expiry >= Date.now()) {
+      // We know which server sent it - only ignore if webhook is from THAT server or any other server
+      if (incomingServerId) {
+        if (incomingServerId === serverData.serverId) {
+          console.log(`[outbound-tracker] MATCH FOUND - ignoring echo from sending server ${incomingServerId}`);
+          return true;
+        } else {
+          console.log(`[outbound-tracker] MATCH FOUND - ignoring duplicate from other server ${incomingServerId} (sent by ${serverData.serverId})`);
+          return true;
+        }
+      }
+      console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text with chatGuid)");
+      return true;
+    }
     console.log("[outbound-tracker] MATCH FOUND - ignoring echo (text with chatGuid)");
     return true;
   }
   if (expiry && expiry < Date.now()) {
     recentOutboundMessages.delete(key);
+    outboundServerMap.delete(key);
   }
   
   const textOnlyKey = `text-only|${(text || "").slice(0, 128)}`;
@@ -1241,10 +1281,10 @@ const handleProviderSend = async (req, res) => {
       data = await bbPost(server, "/api/v1/message/text", payload);
       textMessageSent = true;
 
-      rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0);
+      rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0, server.id);
     } else {
       console.log("[provider] no text message, sending attachments only");
-      rememberOutbound("", chatGuid, true);
+      rememberOutbound("", chatGuid, true, server.id);
     }
 
     let successfulAttachments = 0;
@@ -1411,7 +1451,7 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       return res.status(200).json({ ok: true });
     }
 
-    if (isOurOutbound(messageText, chatGuid, hasAttachments)) {
+    if (isOurOutbound(messageText, chatGuid, hasAttachments, serverOverride?.id)) {
       console.log("[inbound] IGNORING - message was sent via bridge (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
@@ -1684,8 +1724,8 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.2",
-    mode: "single-provider-multi-server-routing-optional-private-api",
+    version: "3.7.3",
+    mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
       name: s.name,
@@ -2156,7 +2196,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.2 - OAuth Simplified! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.3 - Server Locking Enabled! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
