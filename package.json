@@ -3,7 +3,7 @@
   "version": "3.7.1",
   "private": true,
   "type": "module",
-  "description": "Multi-server BlueBubbles bridge with optional Private API support - connects GHL to iMessage via dedicated Mac servers",
+  "description": "Multi-server BlueBubbles bridge with optional Private API support for iMessage integration with GoHighLevel",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -29,12 +29,13 @@
   },
   "keywords": [
     "bluebubbles",
-    "gohighlevel",
     "imessage",
+    "gohighlevel",
+    "sms",
+    "messaging",
     "bridge",
     "multi-server",
     "private-api",
-    "real-estate",
-    "crm-integration"
+    "apple-script"
   ]
 }
