@@ -1,6 +1,11 @@
-// index.js - VERSION 3.7.1 (2025-11-07)
+// index.js - VERSION 3.7.2 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.2:
+// - FIXED: OAuth /oauth/start now uses /chooselocation instead of /authorize
+// - IMPROVED: Simplified re-authorization process for private marketplace apps
+// - Users can now visit single URL to re-authorize instead of copying installation link
 // ============================================================================
 // CHANGELOG v3.7.1:
 // - FIXED: Made Private API optional per server (usePrivateAPI flag)
@@ -1585,6 +1590,7 @@ app.get("/oauth/start", (_req, res) => {
     "medias.readonly",
   ].join(" ");
 
+  // Use chooselocation for private marketplace apps (allows location selection)
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     response_type: "code",
@@ -1592,7 +1598,8 @@ app.get("/oauth/start", (_req, res) => {
     scope,
   });
 
-  res.redirect(`${OAUTH_AUTHORIZE_BASE}/authorize?${params.toString()}`);
+  // Changed from /authorize to /chooselocation for better UX with private apps
+  res.redirect(`${OAUTH_AUTHORIZE_BASE}/chooselocation?${params.toString()}`);
 });
 
 app.all("/oauth/callback", async (req, res) => {
@@ -1677,7 +1684,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.1",
+    version: "3.7.2",
     mode: "single-provider-multi-server-routing-optional-private-api",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2149,7 +2156,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.1 - Optional Private API Support! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.2 - OAuth Simplified! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
