@@ -3,10 +3,10 @@
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
 // CHANGELOG v3.7.7:
-// - FIXED: "Chat does not exist" error with Private API by auto-creating chats
-// - Automatically calls /api/v1/chat endpoint before sending when using Private API
-// - Ensures chat is registered in BlueBubbles' IMChatRegistry before sending
-// - Solves the issue where Private API can't find newly created chats
+// - FIXED: "Chat does not exist" error with Private API
+// - Changed to use simple chatGuid format (iMessage;-;+1234567890) for Private API
+// - Removed complex account-specific chatGuid that was causing issues
+// - Private API now works same as AppleScript for chat identification
 // ============================================================================
 // CHANGELOG v3.7.6:
 // - FIXED: Made bb3 (Tiffany) usePrivateAPI configurable via BB3_USE_PRIVATE_API env var
@@ -1274,38 +1274,29 @@ const handleProviderSend = async (req, res) => {
     console.log(`[provider] routing to ${server.name} for ${e164}`);
 
     // ========================================================================
-    // V3.7.1 FIX: Use server.usePrivateAPI flag to determine method
+    // V3.7.7 FIX: Simplified chatGuid for Private API
     // ========================================================================
-    let chatGuid;
+    let chatGuid = chatGuidForPhone(e164);  // Always use simple format: iMessage;-;+1234567890
     let sendFromAccount = null;
     
     if (server.usePrivateAPI && userId) {
-      // Private API enabled - use dedicated account
+      // Private API enabled - determine which account to use
       sendFromAccount = getIMessageAccountForUser(userId, server);
-      chatGuid = `iMessage;-;${e164};-;${sendFromAccount}`;
+      console.log(`[private-api] userId ${userId} → send from ${sendFromAccount} (${server.phoneNumbers.find(p => p.number === sendFromAccount)?.user || 'unknown'})`);
       console.log(`[provider] Private API enabled - using account: ${sendFromAccount}`);
     } else {
-      // AppleScript mode - simple chatGuid
-      chatGuid = chatGuidForPhone(e164);
+      // AppleScript mode
       console.log(`[provider] AppleScript mode - using simple chatGuid`);
     }
 
     let textMessageSent = false;
     let data = null;
     if (message && String(message).trim()) {
-      // ========================================================================
-      // V3.7.7 FIX: Create chat first when using Private API
-      // ========================================================================
-      if (server.usePrivateAPI) {
-        console.log(`[provider] Private API mode - ensuring chat exists before sending`);
-        await bbCreateChat(server, chatGuid);
-      }
-      
       const payload = {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
         message: String(message),
-        method: server.usePrivateAPI ? "private-api" : "apple-script",  // ← THE FIX!
+        method: server.usePrivateAPI ? "private-api" : "apple-script",
       };
       
       console.log(`[provider] sending with method: ${payload.method}`);
