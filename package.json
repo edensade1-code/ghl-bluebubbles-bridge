@@ -1,6 +1,6 @@
 {
   "name": "ghl-bluebubbles-bridge",
-  "version": "3.7.5",
+  "version": "3.7.6",
   "private": true,
   "type": "module",
   "description": "Multi-server BlueBubbles bridge with optional Private API support for iMessage integration with GoHighLevel",
