@@ -1,17 +1,17 @@
-// index.js - VERSION 3.7.6 (2025-11-09)
+// index.js - VERSION 3.7.7 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.7:
+// - FIXED: "Chat does not exist" error with Private API by auto-creating chats
+// - Automatically calls /api/v1/chat endpoint before sending when using Private API
+// - Ensures chat is registered in BlueBubbles' IMChatRegistry before sending
+// - Solves the issue where Private API can't find newly created chats
 // ============================================================================
 // CHANGELOG v3.7.6:
 // - FIXED: Made bb3 (Tiffany) usePrivateAPI configurable via BB3_USE_PRIVATE_API env var
 // - Both bb2 and bb3 now support Private API toggling via environment variables
 // - Set BB2_USE_PRIVATE_API=true and BB3_USE_PRIVATE_API=true when Private API enabled
-// ============================================================================
-// CHANGELOG v3.7.5:
-// - FIXED: Mario switched back to AppleScript mode (Private API not ready)
-// - ADDED: BB2_USE_PRIVATE_API env var for easy toggling
-// - Set BB2_USE_PRIVATE_API=false in Render to use AppleScript (default)
-// - Set BB2_USE_PRIVATE_API=true when Private API is configured on bb2
 // ============================================================================
 // CHANGELOG v3.7.4:
 // - FIXED: Mario's usePrivateAPI flag set to TRUE (was causing 401 auth errors)
@@ -659,6 +659,45 @@ const bbUploadAttachment = async (server, chatGuid, buffer, filename) => {
   }
 };
 
+const bbCreateChat = async (server, chatGuid) => {
+  try {
+    console.log(`[bbCreateChat][${server.id}] ensuring chat exists: ${chatGuid}`);
+    
+    // Extract addresses from chatGuid (format: "iMessage;-;+1234567890" or "iMessage;+;address1;address2")
+    const parts = chatGuid.split(';');
+    let addresses = [];
+    
+    if (parts.length >= 3) {
+      // For single recipient: iMessage;-;+1234567890
+      if (parts[1] === '-') {
+        addresses = [parts.slice(2).join(';')];
+      } else if (parts[1] === '+') {
+        // For group: iMessage;+;address1;address2
+        addresses = parts.slice(2);
+      }
+    }
+    
+    if (addresses.length === 0) {
+      console.log(`[bbCreateChat][${server.id}] could not parse addresses from chatGuid`);
+      return null;
+    }
+    
+    const body = {
+      addresses: addresses,
+      service: 'iMessage',
+      tempGuid: newTempGuid('chat')
+    };
+    
+    const { data } = await bbPost(server, '/api/v1/chat/new', body);
+    console.log(`[bbCreateChat][${server.id}] chat created/exists`);
+    return data;
+  } catch (err) {
+    // Chat might already exist - that's okay
+    console.log(`[bbCreateChat][${server.id}] note: ${err?.response?.status} ${err?.response?.data?.message || err.message}`);
+    return null;
+  }
+};
+
 const verifyBearer = (req) => {
   if (!GHL_SHARED_SECRET) return true;
   const auth = req.header("Authorization") || "";
@@ -1254,6 +1293,14 @@ const handleProviderSend = async (req, res) => {
     let textMessageSent = false;
     let data = null;
     if (message && String(message).trim()) {
+      // ========================================================================
+      // V3.7.7 FIX: Create chat first when using Private API
+      // ========================================================================
+      if (server.usePrivateAPI) {
+        console.log(`[provider] Private API mode - ensuring chat exists before sending`);
+        await bbCreateChat(server, chatGuid);
+      }
+      
       const payload = {
         chatGuid,
         tempGuid: newTempGuid("temp-bridge"),
@@ -1709,7 +1756,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.6",
+    version: "3.7.7",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2181,7 +2228,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.6 - Both Servers Private API Ready! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.7 - Private API Chat Auto-Creation! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
