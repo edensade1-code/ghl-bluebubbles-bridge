@@ -1,6 +1,12 @@
-// index.js - VERSION 3.7.3 (2025-11-09)
+// index.js - VERSION 3.7.4 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.4:
+// - FIXED: Mario's usePrivateAPI flag set to TRUE (was causing 401 auth errors)
+// - FIXED: Removed iPhone echo formatting - no more "👤 YOU (sent from iPhone)" headers
+// - IMPROVED: Cleaner message display - iPhone-sent messages now appear same as contact messages
+// - NOTE: Using dedicated office iPhones, no need for iPhone echo distinction
 // ============================================================================
 // CHANGELOG v3.7.3:
 // - FIXED: Server locking - messages now only process from the sending server
@@ -123,8 +129,8 @@ const BLUEBUBBLES_SERVERS = [
     id: "bb2",
     name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
-    password: process.env.BB2_GUID || "EdenBridge2025",
-    usePrivateAPI: false,  // ← Set to true when Private API is ready on bb2
+    password: process.env.BB2_GUID || "EdenBridge2025Master",
+    usePrivateAPI: true,  // ← Mario uses Private API (FIXED: was false, causing 401 errors)
     parkingNumbers: [
       { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
     ],
@@ -137,8 +143,8 @@ const BLUEBUBBLES_SERVERS = [
     id: "bb3",
     name: "Server 3 (Mac Mini - Tiffany)",
     baseUrl: "https://bb3.asapcashhomebuyers.com",
-    password: process.env.BB3_GUID || "EdenBridge2025",
-    usePrivateAPI: false,  // ← Set to true when Private API is ready on bb3
+    password: process.env.BB3_GUID || "EdenBridge2025Master",
+    usePrivateAPI: false,  // ← Tiffany uses AppleScript mode
     parkingNumbers: [
       { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
     ],
@@ -1009,26 +1015,9 @@ const pushToGhlThread = async ({
   attachments = [],
   server,
 }) => {
-  let messageBody;
-  
-  if (isFromMe) {
-    const date = timestamp ? new Date(timestamp) : new Date();
-    const timeStr = date.toLocaleTimeString('en-US', { 
-      hour: 'numeric', 
-      minute: '2-digit',
-      hour12: true,
-      timeZone: TIMEZONE
-    });
-    
-    messageBody = `━━━━━━━━━━━━━━━━━━━━
-👤 YOU (sent from iPhone)
-⏰ ${timeStr}
-━━━━━━━━━━━━━━━━━━━━
-
-${text || ''}`;
-  } else {
-    messageBody = text || '';
-  }
+  // v3.7.4: Removed iPhone echo formatting
+  // All messages now appear the same regardless of source
+  let messageBody = text || '';
 
   let mediaUrls = [];
   
@@ -1078,23 +1067,8 @@ ${text || ''}`;
   }
 
   if ((!messageBody || !messageBody.trim()) && mediaUrls.length > 0) {
-    if (isFromMe) {
-      const date = timestamp ? new Date(timestamp) : new Date();
-      const timeStr = date.toLocaleTimeString('en-US', { 
-        hour: 'numeric', 
-        minute: '2-digit',
-        hour12: true,
-        timeZone: TIMEZONE
-      });
-      messageBody = `━━━━━━━━━━━━━━━━━━━━
-👤 YOU (sent from iPhone)
-⏰ ${timeStr}
-━━━━━━━━━━━━━━━━━━━━
-
-📎 Sent ${mediaUrls.length} attachment(s)`;
-    } else {
-      messageBody = `📎 ${mediaUrls.length} attachment(s)`;
-    }
+    // v3.7.4: Simple attachment message without iPhone header
+    messageBody = `📎 ${mediaUrls.length} attachment(s)`;
   }
 
   const body = {
@@ -1724,7 +1698,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.3",
+    version: "3.7.4",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2196,7 +2170,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.3 - Server Locking Enabled! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.4 - Private API Fixed + Clean Messages! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
