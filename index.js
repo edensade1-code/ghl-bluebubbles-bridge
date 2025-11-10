@@ -1,6 +1,12 @@
-// index.js - VERSION 3.7.4 (2025-11-09)
+// index.js - VERSION 3.7.5 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.5:
+// - FIXED: Mario switched back to AppleScript mode (Private API not ready)
+// - ADDED: BB2_USE_PRIVATE_API env var for easy toggling
+// - Set BB2_USE_PRIVATE_API=false in Render to use AppleScript (default)
+// - Set BB2_USE_PRIVATE_API=true when Private API is configured on bb2
 // ============================================================================
 // CHANGELOG v3.7.4:
 // - FIXED: Mario's usePrivateAPI flag set to TRUE (was causing 401 auth errors)
@@ -130,7 +136,7 @@ const BLUEBUBBLES_SERVERS = [
     name: "Server 2 (Mac Mini - Mario)",
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025Master",
-    usePrivateAPI: true,  // ← Mario uses Private API (FIXED: was false, causing 401 errors)
+    usePrivateAPI: (process.env.BB2_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
     parkingNumbers: [
       { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
     ],
@@ -1698,7 +1704,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.4",
+    version: "3.7.5",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2170,7 +2176,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.4 - Private API Fixed + Clean Messages! 🎯🚀`);
+    console.log(`[bridge] VERSION 3.7.5 - AppleScript Safe Mode! 🎯🚀`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
