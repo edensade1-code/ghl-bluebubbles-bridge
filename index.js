@@ -1,6 +1,19 @@
-// index.js - VERSION 3.7.7 (2025-11-09)
+// index.js - VERSION 3.7.9 (2025-11-09)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.9:
+// - FIXED: Private API "Chat does not exist" for NEW contacts
+// - Added automatic AppleScript fallback when Private API can't find chat
+// - First message to new contact uses AppleScript to create chat
+// - Subsequent messages will use Private API (chat now exists)
+// - Seamless experience - users won't notice the fallback
+// ============================================================================
+// CHANGELOG v3.7.8:
+// - FIXED: Duplicate incoming messages in GHL
+// - Now ignoring "updated-message" webhook events (only processing "new-message")
+// - BlueBubbles sends both new-message and updated-message for same message
+// - Updated-message events are for read receipts, not new content
 // ============================================================================
 // CHANGELOG v3.7.7:
 // - FIXED: "Chat does not exist" error with Private API
@@ -1301,8 +1314,24 @@ const handleProviderSend = async (req, res) => {
       
       console.log(`[provider] sending with method: ${payload.method}`);
       
-      data = await bbPost(server, "/api/v1/message/text", payload);
-      textMessageSent = true;
+      try {
+        data = await bbPost(server, "/api/v1/message/text", payload);
+        textMessageSent = true;
+      } catch (err) {
+        // ========================================================================
+        // V3.7.9 FIX: Fallback to AppleScript if Private API fails with "Chat does not exist"
+        // ========================================================================
+        const errorMsg = err?.response?.data?.error?.message || err?.message || '';
+        if (server.usePrivateAPI && errorMsg.includes('Chat does not exist')) {
+          console.log(`[provider] Private API failed with "Chat does not exist" - falling back to AppleScript`);
+          payload.method = "apple-script";
+          data = await bbPost(server, "/api/v1/message/text", payload);
+          textMessageSent = true;
+          console.log(`[provider] ✅ Message sent via AppleScript fallback`);
+        } else {
+          throw err; // Re-throw if it's a different error
+        }
+      }
 
       rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0, server.id);
     } else {
@@ -1408,6 +1437,15 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     const data = src.data || {};
 
     console.log("[inbound] RAW WEBHOOK PAYLOAD:", JSON.stringify(req.body, null, 2));
+
+    // ========================================================================
+    // V3.7.8 FIX: Ignore "updated-message" events to prevent duplicates
+    // ========================================================================
+    const webhookType = src.type || src.event || null;
+    if (webhookType === 'updated-message' || webhookType === 'message-updated') {
+      console.log("[inbound] IGNORING - webhook type is 'updated-message' (prevents duplicates)");
+      return res.status(200).json({ ok: true, ignored: "updated-message" });
+    }
 
     const messageText =
       data.text ??
@@ -1747,7 +1785,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.7",
+    version: "3.7.9",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2219,7 +2257,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.7 - Private API Chat Auto-Creation! 🎯✨`);
+    console.log(`[bridge] VERSION 3.7.9 - Private API + AppleScript Fallback! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
