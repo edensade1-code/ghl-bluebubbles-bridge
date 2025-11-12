@@ -1,6 +1,12 @@
-// index.js - VERSION 3.7.9 (2025-11-09)
+// index.js - VERSION 3.7.10 (2025-11-11)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// CHANGELOG v3.7.10:
+// - FIXED: Outbound messages echoing back to GHL (race condition)
+// - Now remembering outbound BEFORE sending (not after)
+// - Prevents first webhook from arriving before tempGuid is in tracker
+// - Eliminates duplicate outbound messages in GHL conversations
 // ============================================================================
 // CHANGELOG v3.7.9:
 // - FIXED: Private API "Chat does not exist" for NEW contacts
@@ -1312,6 +1318,12 @@ const handleProviderSend = async (req, res) => {
         method: server.usePrivateAPI ? "private-api" : "apple-script",
       };
       
+      // ========================================================================
+      // V3.7.10 FIX: Remember outbound BEFORE sending to prevent race condition
+      // This ensures webhook arrives after tempGuid is in tracker
+      // ========================================================================
+      rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0, server.id);
+      
       console.log(`[provider] sending with method: ${payload.method}`);
       
       try {
@@ -1332,8 +1344,6 @@ const handleProviderSend = async (req, res) => {
           throw err; // Re-throw if it's a different error
         }
       }
-
-      rememberOutbound(String(message), chatGuid, attachmentsFromBody.length > 0, server.id);
     } else {
       console.log("[provider] no text message, sending attachments only");
       rememberOutbound("", chatGuid, true, server.id);
@@ -1785,7 +1795,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.7.9",
+    version: "3.7.10",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2257,7 +2267,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.7.9 - Private API + AppleScript Fallback! 🎯✨`);
+    console.log(`[bridge] VERSION 3.7.10 - Perfect Echo Prevention! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
