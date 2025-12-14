@@ -1,4 +1,4 @@
-// index.js - VERSION 3.9.0 (2025-11-16)
+// index.js - VERSION 3.9.0 (2025-12-13)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
@@ -1650,7 +1650,7 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     });
 
     // ========================================================================
-    // V3.8.0: Trigger GHL Workflow for incoming messages (contact replies only)
+    // V3.9.0: Trigger GHL Workflow for incoming messages (contact replies only)
     // ========================================================================
     if (!isFromMe) {
       // Only trigger workflow for INCOMING messages from contacts (not outbound from iPhone)
@@ -2135,7 +2135,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.8.0",
+    version: "3.9.0",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2607,7 +2607,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.8.0 - Auto-Trigger GHL Workflows! 🎯✨`);
+    console.log(`[bridge] VERSION 3.9.0 - Auto-Trigger GHL Workflows! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
