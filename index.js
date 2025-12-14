@@ -1811,7 +1811,206 @@ app.post("/webhook/ghl", async (req, res) => {
     });
   }
 });
+/* -------------------------------------------------------------------------- */
+/* GHL Marketplace Action: Send iMessage                                      */
+/* -------------------------------------------------------------------------- */
+app.post("/action/send-imessage", async (req, res) => {
+  try {
+    console.log("[action/send-imessage] ========== GHL ACTION CALLED ==========");
+    console.log("[action/send-imessage] Headers:", JSON.stringify(req.headers, null, 2));
+    console.log("[action/send-imessage] Body:", JSON.stringify(req.body, null, 2));
 
+    // GHL sends the action fields in the request body
+    const { 
+      to,           // Recipient phone number
+      message,      // Message text
+      fromUser,     // Eden/Mario/Tiffany/Auto
+      attachmentUrl,// Optional attachment
+      contactId,    // GHL may include this
+      locationId,   // GHL may include this
+      userId,       // GHL assigned user
+    } = req.body;
+
+    // Validate required fields
+    if (!to) {
+      console.error("[action/send-imessage] Missing 'to' field");
+      return res.status(400).json({ 
+        success: false, 
+        error: "Missing required field: to (recipient phone number)" 
+      });
+    }
+
+    if (!message && !attachmentUrl) {
+      console.error("[action/send-imessage] Missing message and attachment");
+      return res.status(400).json({ 
+        success: false, 
+        error: "Missing required field: message or attachmentUrl" 
+      });
+    }
+
+    // Normalize phone number
+    let e164;
+    try {
+      e164 = ensureE164(String(to));
+    } catch (err) {
+      console.error("[action/send-imessage] Invalid phone:", to);
+      return res.status(400).json({ 
+        success: false, 
+        error: `Invalid phone number: ${to}. Use E.164 format like +13051234567` 
+      });
+    }
+
+    // Determine which server/user to send from
+    let server;
+    let routedBy = "auto";
+
+    if (fromUser && fromUser !== "Auto" && fromUser !== "auto") {
+      // User explicitly selected a team member
+      const userLower = fromUser.toLowerCase();
+      if (userLower === "eden") {
+        server = BLUEBUBBLES_SERVERS[0]; // bb1
+        routedBy = "explicit-eden";
+      } else if (userLower === "mario") {
+        server = BLUEBUBBLES_SERVERS[1]; // bb2
+        routedBy = "explicit-mario";
+      } else if (userLower === "tiffany") {
+        server = BLUEBUBBLES_SERVERS[2]; // bb3
+        routedBy = "explicit-tiffany";
+      } else {
+        server = BLUEBUBBLES_SERVERS[0]; // fallback
+        routedBy = "fallback";
+      }
+      console.log(`[action/send-imessage] Explicit fromUser: ${fromUser} → ${server.name}`);
+    } else if (userId) {
+      // Use GHL's assigned user
+      server = findServerByUserId(userId);
+      routedBy = "ghl-userId";
+      console.log(`[action/send-imessage] GHL userId: ${userId} → ${server.name}`);
+    } else if (contactId && locationId) {
+      // Look up the contact's conversation assignment
+      try {
+        const parkingNumber = await getAssignedUserParkingNumber(locationId, contactId, BLUEBUBBLES_SERVERS[0]);
+        server = findServerByParkingNumber(parkingNumber);
+        routedBy = "conversation-assignment";
+        console.log(`[action/send-imessage] Conversation assignment → ${server.name}`);
+      } catch (e) {
+        server = BLUEBUBBLES_SERVERS[0];
+        routedBy = "fallback-after-lookup-error";
+      }
+    } else {
+      // Default to first server
+      server = BLUEBUBBLES_SERVERS[0];
+      routedBy = "default";
+    }
+
+    console.log(`[action/send-imessage] Routing: ${routedBy} → ${server.name}`);
+
+    // Build the chatGuid
+    const chatGuid = chatGuidForPhone(e164);
+
+    // Remember outbound to prevent echo
+    rememberOutbound(String(message || ""), chatGuid, !!attachmentUrl, server.id);
+
+    // Send the text message
+    let textMessageSent = false;
+    let data = null;
+
+    if (message && String(message).trim()) {
+      const payload = {
+        chatGuid,
+        tempGuid: newTempGuid("action"),
+        message: String(message),
+        method: server.usePrivateAPI ? "private-api" : "apple-script",
+      };
+
+      console.log(`[action/send-imessage] Sending text via ${payload.method}...`);
+
+      try {
+        data = await bbPost(server, "/api/v1/message/text", payload);
+        textMessageSent = true;
+        console.log(`[action/send-imessage] ✅ Text message sent`);
+      } catch (err) {
+        // Fallback to AppleScript if Private API fails
+        const errorMsg = err?.response?.data?.error?.message || err?.message || '';
+        if (server.usePrivateAPI && errorMsg.includes('Chat does not exist')) {
+          console.log(`[action/send-imessage] Private API failed, falling back to AppleScript`);
+          payload.method = "apple-script";
+          data = await bbPost(server, "/api/v1/message/text", payload);
+          textMessageSent = true;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // Send attachment if provided
+    let attachmentSent = false;
+    if (attachmentUrl) {
+      try {
+        console.log(`[action/send-imessage] Downloading attachment: ${attachmentUrl}`);
+        const downloadResult = await downloadGHLAttachment(attachmentUrl);
+        
+        if (downloadResult && downloadResult.buffer) {
+          const { buffer, mimeType } = downloadResult;
+          
+          // Extract filename from URL
+          let filename = attachmentUrl.split('/').pop()?.split('?')[0] || 'attachment';
+          if (!filename.includes('.')) {
+            const extMap = {
+              'image/png': '.png',
+              'image/jpeg': '.jpg',
+              'image/gif': '.gif',
+              'image/webp': '.webp',
+              'application/pdf': '.pdf',
+              'video/mp4': '.mp4',
+            };
+            filename += (extMap[mimeType] || '');
+          }
+
+          console.log(`[action/send-imessage] Uploading attachment to BlueBubbles...`);
+          await bbUploadAttachment(server, chatGuid, buffer, filename);
+          attachmentSent = true;
+          console.log(`[action/send-imessage] ✅ Attachment sent`);
+        }
+      } catch (e) {
+        console.error(`[action/send-imessage] Attachment failed:`, e.message);
+      }
+    }
+
+    // Return success response to GHL
+    const response = {
+      success: true,
+      status: "delivered",
+      messageId: data?.guid || data?.data?.guid || `action-${newTempGuid()}`,
+      to: e164,
+      from: server.parkingNumbers[0]?.number,
+      fromUser: server.parkingNumbers[0]?.user,
+      server: server.name,
+      routedBy,
+      textMessageSent,
+      attachmentSent,
+      timestamp: new Date().toISOString(),
+    };
+
+    console.log(`[action/send-imessage] ✅ SUCCESS:`, response);
+
+    return res.status(200).json(response);
+
+  } catch (err) {
+    console.error("[action/send-imessage] ERROR:", err?.response?.data || err.message);
+    
+    return res.status(500).json({
+      success: false,
+      error: err?.response?.data?.message || err?.message || "Failed to send iMessage",
+      details: err?.response?.data || null,
+    });
+  }
+});
+
+// Also support alternate path format
+app.post("/actions/send-imessage", async (req, res) => {
+  return res.redirect(307, '/action/send-imessage');
+});
 /* -------------------------------------------------------------------------- */
 /* OAuth Flow                                                                 */
 /* -------------------------------------------------------------------------- */
