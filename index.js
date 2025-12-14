@@ -1,6 +1,16 @@
-// index.js - VERSION 3.8.0 (2025-11-16)
+// index.js - VERSION 3.9.0 (2025-11-16)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
+// ============================================================================
+// ============================================================================
+// CHANGELOG v3.9.0:
+// - ADDED: GHL Marketplace Action "Send iMessage" for workflow automation
+// - Workflows can now send iMessages via Actions → Send iMessage
+// - Supports text messages and attachments via URL
+// - Smart routing: Auto (uses assigned rep), or explicit Eden/Mario/Tiffany
+// - Routes by: fromUser selection → GHL userId → conversation assignment → default
+// - Endpoint: POST /action/send-imessage
+// - Returns: success, messageId, server, fromUser, routedBy for workflow use
 // ============================================================================
 // CHANGELOG v3.8.0:
 // - ADDED: Automatic GHL Workflow triggering for incoming iMessages
