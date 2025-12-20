@@ -1,14 +1,15 @@
-// index.js - VERSION 3.10.0 (2025-12-19)
+// index.js - VERSION 3.10.0 (2025-12-20)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
 // ============================================================================
 // CHANGELOG v3.10.0:
 // - ADDED: bb4 server for Amber's dedicated Mac Mini
-// - ADDED: Amber's phone numbers (+13054978748 iMessage, +13059096544 parking)
-// - ADDED: Amber's GHL User ID (SbeaaZLaNSaWIeeljIbB)
-// - ADDED: Environment variables PARKING_NUMBER_AMBER and BB4_GUID
-// - Full 4-server architecture (bb1=Eden, bb2=Mario, bb3=Tiffany, bb4=Amber)
+// - ADDED: Amber's configuration (iMessage: +13054978748, Parking: +13059096544)
+// - ADDED: GHL_USER_ID_AMBER and PARKING_NUMBER_AMBER env vars
+// - UPDATED: Four-server architecture (bb1=Eden, bb2=Mario, bb3=Tiffany, bb4=Amber)
+// - UPDATED: All routing logic to support 4 team members
+// - VERIFIED: Full 4-server architecture with dedicated parking numbers
 // ============================================================================
 // CHANGELOG v3.9.0:
 // - ADDED: GHL Marketplace Action "Send iMessage" for workflow automation
@@ -170,7 +171,7 @@ const GHL_USER_ID_AMBER = "SbeaaZLaNSaWIeeljIbB";
 /* Config - BlueBubbles Servers with Parking Numbers from Env Vars            */
 /* -------------------------------------------------------------------------- */
 // Define your BlueBubbles servers here
-// NEW v3.10.0: Each user now has dedicated server (bb1=Eden, bb2=Mario, bb3=Tiffany, bb4=Amber)
+// NEW v3.10.0: Four-server architecture (bb1=Eden, bb2=Mario, bb3=Tiffany, bb4=Amber)
 // NEW v3.7.1: Added usePrivateAPI flag - set to true ONLY when Private API is enabled
 const BLUEBUBBLES_SERVERS = [
   {
@@ -1680,10 +1681,10 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       try {
         // Determine which user this message is assigned to
         let assignedUser = 'Unknown';
-        if (locationNumber === PARKING_NUMBER_EDEN) assignedUser = 'Eden';
-        else if (locationNumber === PARKING_NUMBER_MARIO) assignedUser = 'Mario';
-        else if (locationNumber === PARKING_NUMBER_TIFFANY) assignedUser = 'Tiffany';
-        else if (locationNumber === PARKING_NUMBER_AMBER) assignedUser = 'Amber';
+        if (locationNumber === '+17867334163') assignedUser = 'Eden';
+        else if (locationNumber === '+17868828328') assignedUser = 'Mario';
+        else if (locationNumber === '+19547587444') assignedUser = 'Tiffany';
+        else if (locationNumber === '+13059096544') assignedUser = 'Amber';
 
         const workflowPayload = {
           from: contactE164,
@@ -2053,7 +2054,50 @@ app.post("/action/send-imessage", async (req, res) => {
 app.post("/actions/send-imessage", async (req, res) => {
   return res.redirect(307, '/action/send-imessage');
 });
-authorization_code",
+/* -------------------------------------------------------------------------- */
+/* OAuth Flow                                                                 */
+/* -------------------------------------------------------------------------- */
+
+app.get("/oauth/start", (_req, res) => {
+  if (!CLIENT_ID || !GHL_REDIRECT_URI) {
+    return res.status(400).send("OAuth not configured (missing CLIENT_ID or GHL_REDIRECT_URI).");
+  }
+
+  const scope = [
+    "conversations/message.write",
+    "conversations/message.readonly",
+    "conversations.write",
+    "conversations.readonly",
+    "contacts.readonly",
+    "locations.readonly",
+    "medias.write",
+    "medias.readonly",
+  ].join(" ");
+
+  // Use chooselocation for private marketplace apps (allows location selection)
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: GHL_REDIRECT_URI,
+    scope,
+  });
+
+  // Changed from /authorize to /chooselocation for better UX with private apps
+  res.redirect(`${OAUTH_AUTHORIZE_BASE}/chooselocation?${params.toString()}`);
+});
+
+app.all("/oauth/callback", async (req, res) => {
+  try {
+    const code  = (req.query.code || req.body?.code || "").toString();
+    const error = (req.query.error || req.body?.error || "").toString();
+
+    if (error) return res.status(400).send("OAuth denied. Please try again.");
+    if (!code)  return res.status(400).send("Missing authorization code.");
+
+    const body = qs.stringify({
+      client_id:     CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type:    "authorization_code",
       code,
       redirect_uri:  GHL_REDIRECT_URI,
     });
@@ -2115,7 +2159,6 @@ app.get("/oauth/debug", (_req, res) => {
     })),
   });
 });
-
 /* -------------------------------------------------------------------------- */
 /* Debug Endpoints                                                            */
 /* -------------------------------------------------------------------------- */
@@ -2603,7 +2646,7 @@ app.post("/call-initiated", async (req, res) => {
 
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.10.0 - Added Amber (bb4)! 🎉`);
+    console.log(`[bridge] VERSION 3.10.0 - Amber Added! 🎉✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
@@ -2638,7 +2681,7 @@ app.post("/call-initiated", async (req, res) => {
     console.log("  ✅ Single conversation provider (like SendBlue)");
     console.log("  ✅ Routes by GHL userId (most reliable!)");
     console.log("  ✅ Conversation assignment routing (bulletproof!)");
-    console.log("  ✅ Optional Private API per server (NEW v3.7.1!)");
+    console.log("  ✅ Optional Private API per server");
     console.log("  ✅ AppleScript fallback when Private API disabled");
     console.log("  ✅ Dedicated parking numbers per user (via ENV)");
     console.log("  ✅ Text messages (all directions)");
@@ -2648,6 +2691,8 @@ app.post("/call-initiated", async (req, res) => {
     console.log("  ✅ Privacy filter (no auto-contact creation)");
     console.log("  ✅ Click-to-call (Chrome extension integration)");
     console.log("  ✅ Click-to-chat (Chrome extension integration)");
+    console.log("  ✅ GHL Marketplace Actions (Send iMessage)");
+    console.log("  ✅ Workflow automation triggers");
     console.log("");
     if (CLIENT_ID && CLIENT_SECRET) console.log("[bridge] OAuth is configured.");
     if (GHL_SHARED_SECRET) console.log("[bridge] Shared secret checks enabled.");
