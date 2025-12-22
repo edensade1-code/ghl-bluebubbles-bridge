@@ -199,6 +199,7 @@ const BLUEBUBBLES_SERVERS = [
   {
     id: "bb1",
     name: "Server 1 (Original Mac - Eden)",
+    enabled: false,  // DISABLED - waiting for new office Mac
     baseUrl: process.env.BB_BASE || "https://relay.asapcashhomebuyers.com",
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
     usePrivateAPI: false,  // ← Private API not enabled on bb1
@@ -213,6 +214,7 @@ const BLUEBUBBLES_SERVERS = [
   {
     id: "bb2",
     name: "Server 2 (Mac Mini - Mario)",
+    enabled: true,
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025Master",
     usePrivateAPI: (process.env.BB2_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
@@ -227,6 +229,7 @@ const BLUEBUBBLES_SERVERS = [
   {
     id: "bb3",
     name: "Server 3 (Mac Mini - Tiffany)",
+    enabled: true,
     baseUrl: "https://bb3.asapcashhomebuyers.com",
     password: process.env.BB3_GUID || "EdenBridge2025Master",
     usePrivateAPI: (process.env.BB3_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
@@ -241,6 +244,7 @@ const BLUEBUBBLES_SERVERS = [
   {
     id: "bb4",
     name: "Server 4 (Mac Mini - Amber)",
+    enabled: true,
     baseUrl: "https://bb4.asapcashhomebuyers.com",
     password: process.env.BB4_GUID || "EdenBridge2025!",
     usePrivateAPI: (process.env.BB4_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
@@ -620,6 +624,17 @@ async function checkAllServers() {
   console.log("[health-check] checking all BB servers...");
   
   for (const server of BLUEBUBBLES_SERVERS) {
+    // Skip disabled servers
+    if (server.enabled === false) {
+      console.log(`[health-check] ${server.id}: ⏸️ DISABLED (skipping)`);
+      serverHealth[server.id] = {
+        healthy: true,
+        lastCheck: new Date().toISOString(),
+        lastError: null,
+        disabled: true
+      };
+      continue;
+    }
     try {
       const url = `${server.baseUrl}/api/v1/ping`;
       await axios.get(url, {
