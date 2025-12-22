@@ -595,7 +595,7 @@ async function sendHealthAlert(message) {
   
   if (workingServer) {
     try {
-      const url = `${workingServer.baseUrl}/api/v1/message/text`;
+      const url = `${workingServer.baseUrl}/api/v1/message/text?guid=${encodeURIComponent(workingServer.password)}`;
       await axios.post(
         url,
         {
@@ -603,10 +603,7 @@ async function sendHealthAlert(message) {
           message: message,
           method: "apple-script"
         },
-        {
-          params: { guid: workingServer.password },
-          timeout: 15000
-        }
+        {timeout: 15000}
       );
       console.log(`[health-alert] sent via ${workingServer.id}`);
     } catch (e) {
