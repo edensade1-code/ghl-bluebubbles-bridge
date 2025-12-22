@@ -600,6 +600,7 @@ async function sendHealthAlert(message) {
         url,
         {
           chatGuid: `iMessage;-;${ALERT_PHONE}`,
+          tempGuid: `temp-alert-${Date.now()}`,
           message: message,
           method: "apple-script"
         },
