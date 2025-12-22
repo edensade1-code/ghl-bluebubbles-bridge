@@ -591,7 +591,7 @@ async function sendHealthAlert(message) {
   console.log(`[health-alert] ${message}`);
   
   // Find a working server to send the alert
-  const workingServer = BLUEBUBBLES_SERVERS.find(s => serverHealth[s.id]?.healthy);
+  const workingServer = BLUEBUBBLES_SERVERS.find(s => s.enabled !== false && serverHealth[s.id]?.healthy);
   
   if (workingServer) {
     try {
