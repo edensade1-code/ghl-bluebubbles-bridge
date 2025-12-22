@@ -1,4 +1,4 @@
-// index.js - VERSION 3.10.0 (2025-12-20)
+// index.js - VERSION 3.10.0 (2025-12-20) + (2025-12-21) with Health Monitoring Functions - section 1-4
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
@@ -166,6 +166,28 @@ const GHL_USER_ID_EDEN = "11umP2K61R5cuEoadD9x";
 const GHL_USER_ID_MARIO = "7XskZuGiwXLneiUx10ne";
 const GHL_USER_ID_TIFFANY = "BQAAlsqc9xdibpaxZP3q";
 const GHL_USER_ID_AMBER = "SbeaaZLaNSaWIeeljIbB";
+
+/* -------------------------------------------------------------------------- */
+/* Health Monitoring Functions - section 1                                    */
+/* -------------------------------------------------------------------------- */
+// Health Monitoring Configuration
+const ALERT_PHONE = process.env.ALERT_PHONE || "+13058337256"; // Your phone for alerts
+const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const TOKEN_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
+
+// Track server health status
+const serverHealth = {
+  bb1: { healthy: true, lastCheck: null, lastError: null },
+  bb2: { healthy: true, lastCheck: null, lastError: null },
+  bb3: { healthy: true, lastCheck: null, lastError: null },
+  bb4: { healthy: true, lastCheck: null, lastError: null },
+};
+
+// Track token health status
+const tokenHealth = {
+  lastCheck: null,
+  issues: [],
+};
 
 /* -------------------------------------------------------------------------- */
 /* Config - BlueBubbles Servers with Parking Numbers from Env Vars            */
@@ -554,7 +576,126 @@ function rememberPush(p) {
   LAST_INBOUND.push({ at: new Date().toISOString(), ...p });
   if (LAST_INBOUND.length > 25) LAST_INBOUND.shift();
 }
+/* -------------------------------------------------------------------------- */
+/* Health Monitoring Functions - Section 2                                    */
+/* -------------------------------------------------------------------------- */
 
+/**
+ * Send alert via iMessage through a working BB server
+ */
+async function sendHealthAlert(message) {
+  console.log(`[health-alert] ${message}`);
+  
+  // Find a working server to send the alert
+  const workingServer = BLUEBUBBLES_SERVERS.find(s => serverHealth[s.id]?.healthy);
+  
+  if (workingServer) {
+    try {
+      const url = `${workingServer.baseUrl}/api/v1/message/text`;
+      await axios.post(
+        url,
+        {
+          chatGuid: `iMessage;-;${ALERT_PHONE}`,
+          message: message,
+          method: "apple-script"
+        },
+        {
+          params: { guid: workingServer.password },
+          timeout: 15000
+        }
+      );
+      console.log(`[health-alert] sent via ${workingServer.id}`);
+    } catch (e) {
+      console.error(`[health-alert] failed to send via ${workingServer.id}:`, e.message);
+    }
+  } else {
+    console.error("[health-alert] NO WORKING SERVERS - cannot send alert!");
+  }
+}
+
+/**
+ * Check all BlueBubbles servers
+ */
+async function checkAllServers() {
+  console.log("[health-check] checking all BB servers...");
+  
+  for (const server of BLUEBUBBLES_SERVERS) {
+    try {
+      const url = `${server.baseUrl}/api/v1/ping`;
+      await axios.get(url, {
+        params: { guid: server.password },
+        timeout: 10000
+      });
+      
+      const wasDown = !serverHealth[server.id].healthy;
+      serverHealth[server.id] = {
+        healthy: true,
+        lastCheck: new Date().toISOString(),
+        lastError: null
+      };
+      
+      if (wasDown) {
+        await sendHealthAlert(`✅ ${server.name} is BACK ONLINE`);
+      }
+      
+      console.log(`[health-check] ${server.id}: ✅ UP`);
+    } catch (error) {
+      const wasUp = serverHealth[server.id].healthy;
+      serverHealth[server.id] = {
+        healthy: false,
+        lastCheck: new Date().toISOString(),
+        lastError: error.message
+      };
+      
+      if (wasUp) {
+        await sendHealthAlert(`⚠️ ${server.name} is DOWN!\nError: ${error.message}`);
+      }
+      
+      console.log(`[health-check] ${server.id}: ❌ DOWN - ${error.message}`);
+    }
+  }
+}
+
+/**
+ * Check GHL token health
+ */
+async function checkTokenHealth() {
+  console.log("[health-check] checking GHL tokens...");
+  const issues = [];
+  
+  if (tokenStore.size === 0) {
+    console.log("[health-check] no tokens stored yet");
+    return;
+  }
+  
+  for (const [locationId, token] of tokenStore.entries()) {
+    if (!token || !token.access_token) {
+      issues.push(`❌ NO TOKEN for location ${locationId.slice(0, 8)}...`);
+      continue;
+    }
+    
+    if (token._created_at_ms && token.expires_in) {
+      const expiresAt = token._created_at_ms + (token.expires_in * 1000);
+      const now = Date.now();
+      const hoursUntilExpiry = (expiresAt - now) / (1000 * 60 * 60);
+      
+      if (hoursUntilExpiry < 0) {
+        issues.push(`❌ TOKEN EXPIRED for ${locationId.slice(0, 8)}...`);
+      } else if (hoursUntilExpiry < 2) {
+        issues.push(`⚠️ TOKEN EXPIRING for ${locationId.slice(0, 8)}... (${Math.round(hoursUntilExpiry * 60)}min left)`);
+      }
+    }
+  }
+  
+  tokenHealth.lastCheck = new Date().toISOString();
+  tokenHealth.issues = issues;
+  
+  if (issues.length > 0) {
+    await sendHealthAlert(`🔑 GHL Token Issues:\n${issues.join('\n')}`);
+  }
+  
+  console.log(`[health-check] tokens: ${issues.length === 0 ? '✅ OK' : issues.join(', ')}`);
+}
 /* -------------------------------------------------------------------------- */
 /* Token Persistence                                                          */
 /* -------------------------------------------------------------------------- */
@@ -2241,44 +2382,128 @@ app.get("/", (_req, res) => {
   });
 });
 
-app.get("/health", async (_req, res) => {
-  const serverStatuses = [];
+/* -------------------------------------------------------------------------- */
+/* Health Monitoring Functions - section 3                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Combined health check endpoint
+ * GET /health
+ */
+app.get("/health", async (req, res) => {
+  const health = {
+    timestamp: new Date().toISOString(),
+    overall: "✅ OK",
+    servers: {},
+    tokens: {},
+    alertPhone: ALERT_PHONE,
+  };
   
+  // Server status
   for (const server of BLUEBUBBLES_SERVERS) {
-    try {
-      const pong = await axios.get(
-        `${server.baseUrl}/api/v1/ping?guid=${encodeURIComponent(server.password)}`,
-        { timeout: 8000 }
-      );
-      serverStatuses.push({
-        id: server.id,
-        name: server.name,
-        baseUrl: server.baseUrl,
-        users: server.parkingNumbers.map(p => p.user),
-        parkingNumbers: server.parkingNumbers.map(p => p.number),
-        usePrivateAPI: server.usePrivateAPI,
-        status: "online",
-        ping: pong.data ?? null,
-      });
-    } catch (e) {
-      serverStatuses.push({
-        id: server.id,
-        name: server.name,
-        baseUrl: server.baseUrl,
-        users: server.parkingNumbers.map(p => p.user),
-        parkingNumbers: server.parkingNumbers.map(p => p.number),
-        usePrivateAPI: server.usePrivateAPI,
-        status: "offline",
-        error: e?.response?.data ?? e?.message ?? "Ping failed",
-      });
+    const status = serverHealth[server.id];
+    health.servers[server.id] = {
+      name: server.name,
+      healthy: status.healthy,
+      lastCheck: status.lastCheck,
+      error: status.lastError
+    };
+    if (!status.healthy) {
+      health.overall = "⚠️ ISSUES";
     }
   }
   
-  const allOnline = serverStatuses.every(s => s.status === "online");
+  // Token status
+  if (typeof locationTokens !== 'undefined') {
+    for (const [locationId, token] of Object.entries(locationTokens)) {
+      const expiresAt = token?.expires_at ? new Date(token.expires_at) : null;
+      const now = new Date();
+      const hoursLeft = expiresAt ? Math.round((expiresAt - now) / (1000 * 60 * 60)) : null;
+      
+      health.tokens[locationId.slice(0, 8) + "..."] = {
+        hasToken: !!token?.access_token,
+        hasRefresh: !!token?.refresh_token,
+        hoursUntilExpiry: hoursLeft,
+        status: !token?.access_token ? "❌ MISSING" : 
+                (expiresAt && expiresAt < now) ? "❌ EXPIRED" : 
+                (hoursLeft && hoursLeft < 2) ? "⚠️ EXPIRING" : "✅ OK"
+      };
+      
+      if (!token?.access_token || (expiresAt && expiresAt < now)) {
+        health.overall = "⚠️ ISSUES";
+      }
+    }
+  }
   
-  res.status(allOnline ? 200 : 503).json({
-    ok: allOnline,
-    servers: serverStatuses,
+  res.json(health);
+});
+
+/**
+ * Detailed server health check
+ * GET /health/servers
+ */
+app.get("/health/servers", async (req, res) => {
+  // Run fresh check
+  await checkAllServers();
+  
+  const results = BLUEBUBBLES_SERVERS.map(server => ({
+    id: server.id,
+    name: server.name,
+    url: server.baseUrl,
+    ...serverHealth[server.id]
+  }));
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    servers: results
+  });
+});
+
+/**
+ * Detailed token health check
+ * GET /health/tokens
+ */
+app.get("/health/tokens", async (req, res) => {
+  const status = [];
+  
+  if (typeof locationTokens === 'undefined' || Object.keys(locationTokens).length === 0) {
+    return res.json({
+      timestamp: new Date().toISOString(),
+      message: "No tokens stored yet. Complete OAuth flow first.",
+      tokens: []
+    });
+  }
+  
+  for (const [locationId, token] of Object.entries(locationTokens)) {
+    const expiresAt = token?.expires_at ? new Date(token.expires_at) : null;
+    const now = new Date();
+    
+    status.push({
+      locationId: locationId,
+      hasAccessToken: !!token?.access_token,
+      hasRefreshToken: !!token?.refresh_token,
+      expiresAt: expiresAt?.toISOString() || "unknown",
+      hoursUntilExpiry: expiresAt ? Math.round((expiresAt - now) / (1000 * 60 * 60)) : null,
+      status: !token?.access_token ? "❌ MISSING" : 
+              (expiresAt && expiresAt < now) ? "❌ EXPIRED" : "✅ OK"
+    });
+  }
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    tokens: status
+  });
+});
+
+/**
+ * Force send a test alert
+ * GET /health/test-alert
+ */
+app.get("/health/test-alert", async (req, res) => {
+  await sendHealthAlert("🧪 TEST ALERT - Health monitoring is working!");
+  res.json({ 
+    message: "Test alert sent",
+    alertPhone: ALERT_PHONE
   });
 });
 
@@ -2643,7 +2868,26 @@ app.post("/call-initiated", async (req, res) => {
 
 (async function() {
   await loadTokenStore();
+/* -------------------------------------------------------------------------- */
+/* Health Monitoring Functions - section 4                                    */
+/* -------------------------------------------------------------------------- */
 
+// Start health monitoring
+console.log("[health] Starting health monitoring...");
+console.log(`[health] Alert phone: ${ALERT_PHONE}`);
+console.log(`[health] Server check interval: ${HEALTH_CHECK_INTERVAL / 1000}s`);
+console.log(`[health] Token check interval: ${TOKEN_CHECK_INTERVAL / 1000}s`);
+
+// Run initial checks
+setTimeout(() => {
+  checkAllServers();
+  checkTokenHealth();
+}, 5000); // Wait 5 seconds for server to start
+
+// Schedule regular checks
+setInterval(checkAllServers, HEALTH_CHECK_INTERVAL);
+setInterval(checkTokenHealth, TOKEN_CHECK_INTERVAL);
+  
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
     console.log(`[bridge] VERSION 3.10.0 - Amber Added! 🎉✨`);
