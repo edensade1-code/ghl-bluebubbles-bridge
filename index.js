@@ -467,6 +467,47 @@ const outboundServerMap = new Map(); // Track which server sent each message
 // Key: contact phone (E.164), Value: { extras, timestamp, message }
 const pausedWorkflows = new Map();
 const PAUSED_WORKFLOW_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Check for timed-out paused workflows every 5 minutes
+setInterval(async () => {
+  const now = Date.now();
+  const timeoutMs = PAUSED_WORKFLOW_TTL_MS;
+  
+  for (const [phone, data] of pausedWorkflows.entries()) {
+    if (now - data.timestamp > timeoutMs) {
+      console.log(`[timeout-check] Workflow timed out for ${phone}, resuming with "No Reply"...`);
+      
+      try {
+        await axios.post(
+          'https://services.leadconnectorhq.com/workflows-marketplace/actions/resume-internal-action',
+          {
+            success: true,
+            successMessage: "Contact did not reply (timeout)",
+            executionResponse: {
+              replyMessage: null,
+              timedOut: true,
+              timeoutTimestamp: new Date().toISOString(),
+            },
+            extras: {
+              ...data.extras,
+              branchId: "No Reply",
+            },
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 15000,
+          }
+        );
+        
+        console.log(`[timeout-check] ✅ Workflow resumed with "No Reply" for ${phone}`);
+        pausedWorkflows.delete(phone);
+      } catch (err) {
+        console.error(`[timeout-check] ❌ Failed to resume timed-out workflow:`, err?.response?.data || err.message);
+        // Still delete to prevent infinite retries
+        pausedWorkflows.delete(phone);
+      }
+    }
+  }
+}, 5 * 60 * 1000); // Check every 5 minutes
 const DEDUPE_TTL_MS = 15_000;
 const OUTBOUND_TTL_MS = 30_000;
 const ATTACHMENT_GRACE_MS = 10_000;
@@ -2323,9 +2364,10 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
           replyMessage: replyMessage,
           replyTimestamp: new Date().toISOString(),
         },
-        extras: pausedData.extras,
-        branchId: "Replied",
-      },
+        extras: {
+          ...pausedData.extras,
+          branchId: "Replied",
+        },
       {
         headers: {
           'Content-Type': 'application/json',
