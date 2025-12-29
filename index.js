@@ -489,7 +489,7 @@ setInterval(async () => {
             },
             extras: {
               ...data.extras,
-              branchId: "No Reply",
+              branchId: "43fe14b8-bf6d-4326-836f-1ec2e5b21428",
             },
           },
           {
@@ -2280,6 +2280,7 @@ const finalLocationId = locationId || extras.locationId;
           );
           
           let conversationId = convSearchResponse.data?.conversations?.[0]?.id;
+console.log(`[action/send-imessage] Conversation search result: conversationId=${conversationId}`);
           
           if (!conversationId) {
             // Create new conversation
@@ -2298,6 +2299,7 @@ const finalLocationId = locationId || extras.locationId;
             // Send outbound message (appears on RIGHT side)
             const messageBody = {
               type: "Custom",
+              contactId: finalContactId,
               conversationId: conversationId,
               message: message || (mediaUrls.length > 0 ? `📎 ${mediaUrls.length} attachment(s)` : ''),
               conversationProviderId: CONVERSATION_PROVIDER_ID,
@@ -2407,7 +2409,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
         },
         extras: {
           ...pausedData.extras,
-          branchId: "Replied",
+          branchId: "b5d8dd45-a193-49a6-84e7-0714e37d5b52",
         },
       },
       {
