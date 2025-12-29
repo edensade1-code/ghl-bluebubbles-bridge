@@ -2014,16 +2014,22 @@ app.post("/action/send-imessage", async (req, res) => {
     console.log("[action/send-imessage] Headers:", JSON.stringify(req.headers, null, 2));
     console.log("[action/send-imessage] Body:", JSON.stringify(req.body, null, 2));
 
-    // GHL sends the action fields in the request body
-    const { 
-      to,           // Recipient phone number
-      message,      // Message text
-      fromUser,     // Eden/Mario/Tiffany/Amber/Auto
-      attachmentUrl,// Optional attachment
-      contactId,    // GHL may include this
-      locationId,   // GHL may include this
-      userId,       // GHL assigned user
-    } = req.body;
+    // GHL Marketplace Actions wrap fields in a "data" object
+const actionData = req.body.data || req.body;
+const { 
+  to,           // Recipient phone number
+  message,      // Message text
+  fromUser,     // Eden/Mario/Tiffany/Amber/Auto
+  attachmentUrl,// Optional attachment
+  contactId,    // GHL may include this
+  locationId,   // GHL may include this
+  userId,       // GHL assigned user
+} = actionData;
+
+// Also grab extras if available (GHL sends additional context here)
+const extras = req.body.extras || {};
+const finalContactId = contactId || extras.contactId;
+const finalLocationId = locationId || extras.locationId;
 
     // Validate required fields
     if (!to) {
