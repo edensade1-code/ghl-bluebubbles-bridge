@@ -2179,7 +2179,28 @@ const finalLocationId = locationId || extras.locationId;
         console.error(`[action/send-imessage] Attachment failed:`, e.message);
       }
     }
-
+// Push the sent message to GHL conversation thread so it appears in CRM
+    if (textMessageSent && finalContactId && finalLocationId) {
+      try {
+        const accessToken = await getValidAccessToken(finalLocationId);
+        if (accessToken) {
+          await pushToGhlThread({
+            locationId: finalLocationId,
+            accessToken,
+            contactId: finalContactId,
+            text: message,
+            fromNumber: server.parkingNumbers[0]?.number,
+            isFromMe: true,
+            timestamp: Date.now(),
+            attachments: [],
+            server,
+          });
+          console.log(`[action/send-imessage] ✅ Message logged to GHL conversation`);
+        }
+      } catch (e) {
+        console.error(`[action/send-imessage] Failed to log to GHL:`, e.message);
+      }
+    }
     // Return success response to GHL
     const response = {
       success: true,
