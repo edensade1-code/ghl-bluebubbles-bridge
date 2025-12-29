@@ -2089,10 +2089,10 @@ const finalLocationId = locationId || extras.locationId;
       server = findServerByUserId(userId);
       routedBy = "ghl-userId";
       console.log(`[action/send-imessage] GHL userId: ${userId} → ${server.name}`);
-    } else if (contactId && locationId) {
+    } else if (finalContactId && finalLocationId) {
       // Look up the contact's conversation assignment
       try {
-        const parkingNumber = await getAssignedUserParkingNumber(locationId, contactId, BLUEBUBBLES_SERVERS[0]);
+        const parkingNumber = await getAssignedUserParkingNumber(finalLocationId, finalContactId, BLUEBUBBLES_SERVERS[0]);
         server = findServerByParkingNumber(parkingNumber);
         routedBy = "conversation-assignment";
         console.log(`[action/send-imessage] Conversation assignment → ${server.name}`);
