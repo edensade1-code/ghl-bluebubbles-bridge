@@ -2273,28 +2273,50 @@ const finalLocationId = locationId || extras.locationId;
             }
           }
 
-          // Use outbound endpoint so message appears on RIGHT side (sent by us)
-          const messageBody = {
-            type: "Custom",
-            contactId: finalContactId,
-            message: message || (mediaUrls.length > 0 ? `📎 ${mediaUrls.length} attachment(s)` : ''),
-            conversationProviderId: CONVERSATION_PROVIDER_ID,
-          };
-
-          if (mediaUrls.length > 0) {
-            messageBody.attachments = mediaUrls;
+          // First, get or create conversation for this contact
+          const convSearchResponse = await axios.get(
+            `${LC_API}/conversations/search?locationId=${encodeURIComponent(finalLocationId)}&contactId=${encodeURIComponent(finalContactId)}`,
+            { headers: lcHeaders(accessToken), timeout: 15000 }
+          );
+          
+          let conversationId = convSearchResponse.data?.conversations?.[0]?.id;
+          
+          if (!conversationId) {
+            // Create new conversation
+            const newConvResponse = await axios.post(
+              `${LC_API}/conversations`,
+              {
+                locationId: finalLocationId,
+                contactId: finalContactId,
+              },
+              { headers: lcHeaders(accessToken), timeout: 15000 }
+            );
+            conversationId = newConvResponse.data?.conversation?.id || newConvResponse.data?.id;
           }
 
-          const outboundResponse = await axios.post(
-            `${LC_API}/conversations/messages`,
-            messageBody,
-            { 
-              headers: lcHeaders(accessToken), 
-              timeout: 20000 
-            }
-          );
+          if (conversationId) {
+            // Send outbound message (appears on RIGHT side)
+            const messageBody = {
+              type: "Custom",
+              conversationId: conversationId,
+              message: message || (mediaUrls.length > 0 ? `📎 ${mediaUrls.length} attachment(s)` : ''),
+              conversationProviderId: CONVERSATION_PROVIDER_ID,
+            };
 
-          console.log(`[action/send-imessage] ✅ Message logged to GHL conversation (outbound)`, outboundResponse.data);
+            if (mediaUrls.length > 0) {
+              messageBody.attachments = mediaUrls;
+            }
+
+            const outboundResponse = await axios.post(
+              `${LC_API}/conversations/messages`,
+              messageBody,
+              { headers: lcHeaders(accessToken), timeout: 20000 }
+            );
+
+            console.log(`[action/send-imessage] ✅ Message logged to GHL conversation (outbound)`, outboundResponse.data);
+          } else {
+            console.error(`[action/send-imessage] Could not find or create conversation for contact ${finalContactId}`);
+          }
         }
       } catch (e) {
         console.error(`[action/send-imessage] Failed to log to GHL:`, e?.response?.data || e.message);
