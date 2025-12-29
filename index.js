@@ -2231,7 +2231,7 @@ const finalLocationId = locationId || extras.locationId;
             fromNumber: server.parkingNumbers[0]?.number,
             isFromMe: true,
             timestamp: Date.now(),
-            attachments: [],
+            attachments: attachmentSent ? attachmentList : [],
             server,
           });
           console.log(`[action/send-imessage] ✅ Message logged to GHL conversation`);
@@ -2324,6 +2324,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
           replyTimestamp: new Date().toISOString(),
         },
         extras: pausedData.extras,
+        branchId: "Replied",
       },
       {
         headers: {
