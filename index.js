@@ -2064,7 +2064,8 @@ const finalLocationId = locationId || extras.locationId;
       });
     }
 
-    if (!message && !attachmentUrl) {
+    const hasAttachments = Array.isArray(attachmentUrl) ? attachmentUrl.length > 0 : !!attachmentUrl;
+    if (!message && !hasAttachments) {
       console.error("[action/send-imessage] Missing message and attachment");
       return res.status(400).json({ 
         success: false, 
@@ -2136,7 +2137,8 @@ const finalLocationId = locationId || extras.locationId;
     const chatGuid = chatGuidForPhone(e164);
 
     // Remember outbound to prevent echo
-    rememberOutbound(String(message || ""), chatGuid, !!attachmentUrl, server.id);
+    const hasAttachmentsForEcho = Array.isArray(attachmentUrl) ? attachmentUrl.length > 0 : !!attachmentUrl;
+    rememberOutbound(String(message || ""), chatGuid, hasAttachmentsForEcho, server.id);
 
     // Send the text message
     let textMessageSent = false;
@@ -2170,18 +2172,31 @@ const finalLocationId = locationId || extras.locationId;
       }
     }
 
-    // Send attachment if provided
+   // Send attachment if provided
     let attachmentSent = false;
-    if (attachmentUrl) {
+    const attachmentList = Array.isArray(attachmentUrl) ? attachmentUrl : (attachmentUrl ? [attachmentUrl] : []);
+    
+    for (const attachment of attachmentList) {
       try {
-        console.log(`[action/send-imessage] Downloading attachment: ${attachmentUrl}`);
-        const downloadResult = await downloadGHLAttachment(attachmentUrl);
+        // Handle both string URLs and object format
+        const url = typeof attachment === 'string' ? attachment : (attachment.url || attachment.src || attachment.mediaUrl);
+        
+        if (!url) {
+          console.log(`[action/send-imessage] Skipping attachment - no URL found:`, attachment);
+          continue;
+        }
+        
+        console.log(`[action/send-imessage] Downloading attachment: ${url}`);
+        const downloadResult = await downloadGHLAttachment(url);
         
         if (downloadResult && downloadResult.buffer) {
           const { buffer, mimeType } = downloadResult;
           
-          // Extract filename from URL
-          let filename = attachmentUrl.split('/').pop()?.split('?')[0] || 'attachment';
+          // Extract filename from URL or attachment object
+          let filename = (typeof attachment === 'object' && attachment.name) 
+            ? attachment.name 
+            : url.split('/').pop()?.split('?')[0] || 'attachment';
+            
           if (!filename.includes('.')) {
             const extMap = {
               'image/png': '.png',
