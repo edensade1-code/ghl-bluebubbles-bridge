@@ -1,7 +1,21 @@
-// index.js - VERSION 3.10.0 (2025-12-20) + (2025-12-21) with Health Monitoring Functions - section 1-4
+// index.js - VERSION 4.0.0 (2025-12-28)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
+// ============================================================================
+// CHANGELOG v4.0.0:
+// - ADDED: Full GHL Workflow Action support for Send iMessage
+// - FIXED: GHL Marketplace Actions wrap fields in "data" object - now extracting correctly
+// - ADDED: Workflow-sent messages now appear in GHL conversation thread (pushToGhlThread)
+// - ADDED: "Wait for Reply" / Pause Execution support for workflows
+//   * When Pause Execution is enabled, bridge stores workflow pause data (contactId, workflowId, stepId, etc.)
+//   * When contact replies via iMessage, bridge calls GHL resume webhook to continue workflow
+//   * Enables building drip campaigns and conversational flows with iMessage
+// - ADDED: pausedWorkflows Map to track contacts with paused workflows awaiting reply
+// - ADDED: resumePausedWorkflow() function to call GHL resume-internal-action endpoint
+// - ADDED: Inbound message handler now checks for paused workflows and resumes them on reply
+// - TECHNICAL: GHL sends extras object with: contactId, key, locationId, statusId, stepId, workflowId, stepIndex
+// - TECHNICAL: Resume webhook URL: https://services.leadconnectorhq.com/workflows-marketplace/actions/resume-internal-action
 // ============================================================================
 // CHANGELOG v3.10.0:
 // - ADDED: bb4 server for Amber's dedicated Mac Mini
@@ -449,6 +463,10 @@ const recentOutboundMessages = new Map();
 const recentInboundKeys = new Map();
 const recentOutboundAttachmentChats = new Map();
 const outboundServerMap = new Map(); // Track which server sent each message
+// Store paused workflow data for "Wait for Reply" functionality
+// Key: contact phone (E.164), Value: { extras, timestamp, message }
+const pausedWorkflows = new Map();
+const PAUSED_WORKFLOW_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DEDUPE_TTL_MS = 15_000;
 const OUTBOUND_TTL_MS = 30_000;
 const ATTACHMENT_GRACE_MS = 10_000;
@@ -1811,7 +1829,13 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     }
 
     console.log(`[inbound] ✅ SUCCESS - ${isFromMe ? 'iPhone' : 'contact'} message pushed as iMessage ${hasAttachments ? 'with ' + attachments.length + ' attachment(s)' : ''} via ${server.name} (parking: ${locationNumber})`);
-
+// Check if there's a paused workflow waiting for this contact's reply
+    if (!isFromMe && contactE164) {
+      const resumed = await resumePausedWorkflow(contactE164, messageText);
+      if (resumed) {
+        console.log(`[inbound] 🔄 Resumed paused workflow for ${contactE164}`);
+      }
+    }
     rememberPush({
       locationId,
       contactId,
@@ -2201,6 +2225,32 @@ const finalLocationId = locationId || extras.locationId;
         console.error(`[action/send-imessage] Failed to log to GHL:`, e.message);
       }
     }
+    // Store paused workflow data if Pause Execution is enabled
+    const workflowExtras = req.body.extras || {};
+    if (workflowExtras.workflowId && workflowExtras.stepId && workflowExtras.key) {
+      pausedWorkflows.set(e164, {
+        extras: {
+          contactId: workflowExtras.contactId || finalContactId,
+          key: workflowExtras.key,
+          locationId: workflowExtras.locationId || finalLocationId,
+          statusId: workflowExtras.statusId,
+          stepId: workflowExtras.stepId,
+          workflowId: workflowExtras.workflowId,
+          stepIndex: workflowExtras.stepIndex,
+        },
+        timestamp: Date.now(),
+        message: message,
+      });
+      console.log(`[action/send-imessage] 📋 Stored paused workflow for ${e164}`);
+      
+      // Clean up old paused workflows
+      const now = Date.now();
+      for (const [phone, data] of pausedWorkflows.entries()) {
+        if (now - data.timestamp > PAUSED_WORKFLOW_TTL_MS) {
+          pausedWorkflows.delete(phone);
+        }
+      }
+    }
     // Return success response to GHL
     const response = {
       success: true,
@@ -2235,6 +2285,50 @@ const finalLocationId = locationId || extras.locationId;
 app.post("/actions/send-imessage", async (req, res) => {
   return res.redirect(307, '/action/send-imessage');
 });
+/* -------------------------------------------------------------------------- */
+/* Resume Paused Workflow (for Wait for Reply)                                */
+/* -------------------------------------------------------------------------- */
+
+async function resumePausedWorkflow(contactPhone, replyMessage) {
+  const pausedData = pausedWorkflows.get(contactPhone);
+  if (!pausedData) {
+    console.log(`[resume-workflow] No paused workflow for ${contactPhone}`);
+    return false;
+  }
+
+  console.log(`[resume-workflow] Found paused workflow for ${contactPhone}, resuming...`);
+
+  try {
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/workflows-marketplace/actions/resume-internal-action',
+      {
+        success: true,
+        successMessage: "Contact replied via iMessage",
+        executionResponse: {
+          replyMessage: replyMessage,
+          replyTimestamp: new Date().toISOString(),
+        },
+        extras: pausedData.extras,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    console.log(`[resume-workflow] ✅ Workflow resumed for ${contactPhone}`, response.data);
+    
+    // Remove from paused workflows
+    pausedWorkflows.delete(contactPhone);
+    
+    return true;
+  } catch (err) {
+    console.error(`[resume-workflow] ❌ Failed to resume workflow:`, err?.response?.data || err.message);
+    return false;
+  }
+}
 /* -------------------------------------------------------------------------- */
 /* OAuth Flow                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -2348,7 +2442,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "3.10.0",
+    version: "4.0.0",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -2734,7 +2828,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v3.10.0</div>
+        <div class="powered-by">Powered by Eden Bridge v4.0.0</div>
       </div>
       
       <script>
@@ -2883,7 +2977,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v3.10.0</div>
+        <div class="powered-by">Powered by Eden Bridge v4.0.0</div>
       </div>
     </body>
     </html>
@@ -2930,7 +3024,7 @@ setInterval(checkTokenHealth, TOKEN_CHECK_INTERVAL);
   
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 3.10.0 - Amber Added! 🎉✨`);
+    console.log(`[bridge] VERSION 4.0.0 - Workflow Wait for Reply! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
