@@ -2260,25 +2260,44 @@ const finalLocationId = locationId || extras.locationId;
       }
     }
 // Push the sent message to GHL conversation thread so it appears in CRM
-    if (textMessageSent && finalContactId && finalLocationId) {
+    if ((textMessageSent || attachmentSent) && finalContactId && finalLocationId) {
       try {
         const accessToken = await getValidAccessToken(finalLocationId);
         if (accessToken) {
-          await pushToGhlThread({
-            locationId: finalLocationId,
-            accessToken,
+          // Build attachment URLs array for GHL
+          let mediaUrls = [];
+          if (attachmentSent && attachmentList.length > 0) {
+            for (const att of attachmentList) {
+              const url = typeof att === 'string' ? att : (att.url || att.src || att.mediaUrl);
+              if (url) mediaUrls.push(url);
+            }
+          }
+
+          // Use outbound endpoint so message appears on RIGHT side (sent by us)
+          const messageBody = {
+            type: "Custom",
             contactId: finalContactId,
-            text: message,
-            fromNumber: server.parkingNumbers[0]?.number,
-            isFromMe: true,
-            timestamp: Date.now(),
-            attachments: attachmentSent ? attachmentList : [],
-            server,
-          });
-          console.log(`[action/send-imessage] ✅ Message logged to GHL conversation`);
+            message: message || (mediaUrls.length > 0 ? `📎 ${mediaUrls.length} attachment(s)` : ''),
+            conversationProviderId: CONVERSATION_PROVIDER_ID,
+          };
+
+          if (mediaUrls.length > 0) {
+            messageBody.attachments = mediaUrls;
+          }
+
+          const outboundResponse = await axios.post(
+            `${LC_API}/conversations/messages`,
+            messageBody,
+            { 
+              headers: lcHeaders(accessToken), 
+              timeout: 20000 
+            }
+          );
+
+          console.log(`[action/send-imessage] ✅ Message logged to GHL conversation (outbound)`, outboundResponse.data);
         }
       } catch (e) {
-        console.error(`[action/send-imessage] Failed to log to GHL:`, e.message);
+        console.error(`[action/send-imessage] Failed to log to GHL:`, e?.response?.data || e.message);
       }
     }
     // Store paused workflow data if Pause Execution is enabled
