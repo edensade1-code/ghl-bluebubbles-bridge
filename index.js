@@ -2368,6 +2368,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
           ...pausedData.extras,
           branchId: "Replied",
         },
+      },
       {
         headers: {
           'Content-Type': 'application/json',
