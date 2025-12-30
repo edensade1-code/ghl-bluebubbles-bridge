@@ -483,7 +483,7 @@ const ACTION_MESSAGE_TTL_MS = 180_000; // 60 seconds
 
 // Remember a message sent via workflow action
 const rememberActionMessage = (contactPhone, messageText) => {
-  const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
+  const key = `${contactPhone}|${(messageText || '').trim().slice(0, 128)}`;
   const expiry = Date.now() + ACTION_MESSAGE_TTL_MS;
   actionSentMessages.set(key, expiry);
   console.log(`[action-tracker] Remembering action message: key=${key}, phone=${contactPhone}, textPreview=${(messageText || '').slice(0, 50)}`);
@@ -499,7 +499,7 @@ const rememberActionMessage = (contactPhone, messageText) => {
 
 // Check if this message was already sent by workflow action
 const isActionSentMessage = (contactPhone, messageText) => {
-  const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
+  const key = `${contactPhone}|${(messageText || '').trim().slice(0, 128)}`;
   const expiry = actionSentMessages.get(key);
   console.log(`[action-tracker] Looking for key=${key}, found expiry=${expiry}, now=${Date.now()}`);
   if (expiry && expiry >= Date.now()) {
