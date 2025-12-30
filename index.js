@@ -1953,6 +1953,11 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       console.log("[inbound] IGNORING - message was sent via bridge (echo prevention)");
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
+    // v4.1.0 FIX: Check for workflow action messages
+if (isFromMe && isActionSentMessage(contactE164, messageText)) {
+  console.log("[inbound] IGNORING - message was sent via workflow action");
+  return res.status(200).json({ ok: true, ignored: "action-sent" });
+}
 
     const any = getAnyLocation();
     if (!any) {
