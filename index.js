@@ -486,7 +486,7 @@ const rememberActionMessage = (contactPhone, messageText) => {
   const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
   const expiry = Date.now() + ACTION_MESSAGE_TTL_MS;
   actionSentMessages.set(key, expiry);
-  console.log(`[action-tracker] Remembering action message to ${contactPhone}`);
+  console.log(`[action-tracker] Remembering action message: key=${key}, phone=${contactPhone}, textPreview=${(messageText || '').slice(0, 50)}`);
   
   // Cleanup old entries
   if (actionSentMessages.size > 100) {
@@ -501,8 +501,9 @@ const rememberActionMessage = (contactPhone, messageText) => {
 const isActionSentMessage = (contactPhone, messageText) => {
   const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
   const expiry = actionSentMessages.get(key);
+  console.log(`[action-tracker] Looking for key=${key}, found expiry=${expiry}, now=${Date.now()}`);
   if (expiry && expiry >= Date.now()) {
-    console.log(`[action-tracker] MATCH FOUND - message already sent by workflow action`);
+    console.log(`[action-tracker] MATCH FOUND - key=${key}`);
     return true;
   }
   if (expiry && expiry < Date.now()) {
