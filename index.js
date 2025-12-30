@@ -1417,11 +1417,23 @@ async function uploadAttachmentToGHLConversation(locationId, accessToken, buffer
     console.log(`[attachment-upload] Success:`, response.data);
     
     // Extract the uploaded file URL
-    const uploadedFiles = response.data?.uploadedFiles || response.data?.files || [];
-    if (uploadedFiles.length > 0) {
-      return uploadedFiles[0].url || uploadedFiles[0];
+    const uploadedFiles = response.data?.uploadedFiles || response.data?.files;
+    
+    // Handle OBJECT format: { "filename.png": "https://..." }
+    if (uploadedFiles && typeof uploadedFiles === 'object' && !Array.isArray(uploadedFiles)) {
+      const urls = Object.values(uploadedFiles);
+      if (urls.length > 0) {
+        console.log(`[attachment-upload] Extracted URL from object format: ${urls[0]}`);
+        return urls[0];
+      }
     }
     
+    // Handle ARRAY format: [{ url: "https://..." }] or ["https://..."]
+    if (Array.isArray(uploadedFiles) && uploadedFiles.length > 0) {
+      const firstFile = uploadedFiles[0];
+      return typeof firstFile === 'string' ? firstFile : firstFile.url || firstFile;
+    }
+
     if (response.data?.url) {
       return response.data.url;
     }
