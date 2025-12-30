@@ -2012,8 +2012,13 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     }
 
     if (isFromMe) {
-      console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name} (parking: ${locationNumber})`);
-    } else {
+  // v4.1.0 FIX: Check if this message was already sent by workflow action
+  if (isActionSentMessage(contactE164, messageText)) {
+    console.log(`[inbound] IGNORING - message was sent via workflow action (preventing duplicate)`);
+    return res.status(200).json({ ok: true, ignored: 'action-sent' });
+  }
+  console.log(`[inbound] IPHONE MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name} (parking: ${locationNumber})`);
+} else {
       console.log(`[inbound] CONTACT MESSAGE - pushing to thread ${hasAttachments ? 'with attachments' : ''} via ${server.name} (parking: ${locationNumber})`);
     }
     
