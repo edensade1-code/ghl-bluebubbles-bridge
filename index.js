@@ -2012,6 +2012,8 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     }
 
     if (isFromMe) {
+      // ADD THIS DEBUG LINE:
+  console.log(`[action-tracker-debug] Checking: phone=${contactE164}, text=${(messageText || '').slice(0, 50)}, mapSize=${actionSentMessages.size}`);
   // v4.1.0 FIX: Check if this message was already sent by workflow action
   if (isActionSentMessage(contactE164, messageText)) {
     console.log(`[inbound] IGNORING - message was sent via workflow action (preventing duplicate)`);
