@@ -479,7 +479,7 @@ const outboundServerMap = new Map(); // Track which server sent each message
 // v4.1.0 FIX #3: Track workflow action messages to prevent duplicates
 // ============================================================================
 const actionSentMessages = new Map();
-const ACTION_MESSAGE_TTL_MS = 60_000; // 60 seconds
+const ACTION_MESSAGE_TTL_MS = 180_000; // 60 seconds
 
 // Remember a message sent via workflow action
 const rememberActionMessage = (contactPhone, messageText) => {
