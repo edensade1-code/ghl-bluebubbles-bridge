@@ -1,7 +1,19 @@
-// index.js - VERSION 4.0.0 (2025-12-28)
+// index.js - VERSION 4.1.0 (2025-12-29)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
+// ============================================================================
+// CHANGELOG v4.1.0:
+// - FIXED: Messages now appear on RIGHT side in GHL (outbound direction)
+//   * Using POST /conversations/messages for workflow-sent messages
+//   * Added pushOutboundToGHL() function for proper outbound messages
+// - FIXED: Attachments now show in GHL conversation thread
+//   * Upload attachments to GHL using /conversations/messages/upload endpoint
+//   * Use returned GHL URLs in the message (not external URLs)
+//   * Added uploadAttachmentToGHLConversation() function
+// - FIXED: Duplicate message sent to iPhone
+//   * Added actionSentMessages tracker to prevent re-triggering via provider webhook
+//   * Workflow action messages are now tracked separately
 // ============================================================================
 // CHANGELOG v4.0.0:
 // - ADDED: Full GHL Workflow Action support for Send iMessage
@@ -463,6 +475,42 @@ const recentOutboundMessages = new Map();
 const recentInboundKeys = new Map();
 const recentOutboundAttachmentChats = new Map();
 const outboundServerMap = new Map(); // Track which server sent each message
+// ============================================================================
+// v4.1.0 FIX #3: Track workflow action messages to prevent duplicates
+// ============================================================================
+const actionSentMessages = new Map();
+const ACTION_MESSAGE_TTL_MS = 60_000; // 60 seconds
+
+// Remember a message sent via workflow action
+const rememberActionMessage = (contactPhone, messageText) => {
+  const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
+  const expiry = Date.now() + ACTION_MESSAGE_TTL_MS;
+  actionSentMessages.set(key, expiry);
+  console.log(`[action-tracker] Remembering action message to ${contactPhone}`);
+  
+  // Cleanup old entries
+  if (actionSentMessages.size > 100) {
+    const now = Date.now();
+    for (const [k, exp] of actionSentMessages.entries()) {
+      if (exp < now) actionSentMessages.delete(k);
+    }
+  }
+};
+
+// Check if this message was already sent by workflow action
+const isActionSentMessage = (contactPhone, messageText) => {
+  const key = `${contactPhone}|${(messageText || "").slice(0, 128)}`;
+  const expiry = actionSentMessages.get(key);
+  if (expiry && expiry >= Date.now()) {
+    console.log(`[action-tracker] MATCH FOUND - message already sent by workflow action`);
+    return true;
+  }
+  if (expiry && expiry < Date.now()) {
+    actionSentMessages.delete(key);
+  }
+  return false;
+};
+// ============================================================================
 // Store paused workflow data for "Wait for Reply" functionality
 // Key: contact phone (E.164), Value: { extras, timestamp, message }
 const pausedWorkflows = new Map();
@@ -1330,6 +1378,109 @@ async function uploadToGHL(locationId, accessToken, buffer, filename, mimeType) 
     return null;
   }
 }
+/* ============================================================================ */
+/* v4.1.0 FIX #2: Upload Attachment to GHL Conversations Endpoint              */
+/* ============================================================================ */
+/**
+ * Upload an attachment to GHL's conversation upload endpoint
+ * This returns a GHL-hosted URL that can be used in messages
+ * 
+ * Endpoint: POST /conversations/messages/upload
+ * Returns: { uploadedFiles: [{ url: "...", name: "..." }] }
+ */
+async function uploadAttachmentToGHLConversation(locationId, accessToken, buffer, filename, conversationId) {
+  try {
+    console.log(`[attachment-upload] Uploading to GHL conversations: ${filename} (${buffer.length} bytes)`);
+    
+    const form = new FormData();
+    form.append('fileAttachment', buffer, {
+      filename: filename,
+      contentType: detectMimeType(buffer, filename)
+    });
+    form.append('conversationId', conversationId);
+    
+    const response = await axios.post(
+      `${LC_API}/conversations/messages/upload`,
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          'Authorization': `Bearer ${accessToken}`,
+          'Version': LC_VERSION
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 60000
+      }
+    );
+    
+    console.log(`[attachment-upload] Success:`, response.data);
+    
+    // Extract the uploaded file URL
+    const uploadedFiles = response.data?.uploadedFiles || response.data?.files || [];
+    if (uploadedFiles.length > 0) {
+      return uploadedFiles[0].url || uploadedFiles[0];
+    }
+    
+    if (response.data?.url) {
+      return response.data.url;
+    }
+    
+    console.log(`[attachment-upload] Could not extract URL from response`);
+    return null;
+  } catch (e) {
+    console.error(`[attachment-upload] Failed:`, e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+}
+
+/* ============================================================================ */
+/* v4.1.0 FIX #1: Push OUTBOUND Message to GHL (appears on RIGHT side)         */
+/* ============================================================================ */
+/**
+ * Push an outbound message to GHL conversation thread
+ * This makes the message appear on the RIGHT side (sent by you/team)
+ * 
+ * For outbound (you→contact): Use POST /conversations/messages with type "Custom"
+ * For inbound (contact→you): Use POST /conversations/messages/inbound
+ */
+async function pushOutboundToGHL({
+  locationId,
+  accessToken,
+  contactId,
+  conversationId,
+  text,
+  attachmentUrls = [],
+}) {
+  try {
+    console.log(`[ghl-outbound] Pushing OUTBOUND message to GHL (RIGHT side)`);
+    console.log(`[ghl-outbound] conversationId: ${conversationId}, contactId: ${contactId}`);
+    console.log(`[ghl-outbound] text: ${text?.slice(0, 50)}..., attachments: ${attachmentUrls.length}`);
+    
+    const body = {
+      type: "Custom",
+      contactId: contactId,
+      message: text || (attachmentUrls.length > 0 ? `📎 Attachment` : ''),
+      conversationProviderId: CONVERSATION_PROVIDER_ID,
+    };
+    
+    if (attachmentUrls.length > 0) {
+      body.attachments = attachmentUrls;
+    }
+    
+    const response = await axios.post(
+      `${LC_API}/conversations/messages`,
+      body,
+      { headers: lcHeaders(accessToken), timeout: 20000 }
+    );
+    
+    console.log(`[ghl-outbound] ✅ Message pushed to GHL (outbound/RIGHT side)`, response.data);
+    return response.data;
+  } catch (e) {
+    console.error(`[ghl-outbound] ❌ Failed:`, e?.response?.status, e?.response?.data || e.message);
+    return null;
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Push Messages to GHL with Attachments                                      */
@@ -1530,7 +1681,21 @@ const handleProviderSend = async (req, res) => {
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
-    
+// ========================================================================
+// v4.1.0 FIX #3: Check if this message was already sent by workflow action
+// ========================================================================
+if (isActionSentMessage(e164, message)) {
+console.log(`[provider] IGNORING - message already sent by workflow action (preventing duplicate)`);
+return res.status(200).json({
+ok: true,
+success: true,
+status: "delivered",
+delivered: true,
+note: "already-sent-by-workflow-action",
+provider: "eden-imessage",
+});
+}
+// ========================================================================
     if ((!message || !String(message).trim()) && attachmentsFromBody.length === 0) {
       return res.status(400).json({ ok: false, success: false, error: "Missing 'message' or attachments" });
     }
@@ -2174,13 +2339,20 @@ const finalLocationId = locationId || extras.locationId;
 
     console.log(`[action/send-imessage] Routing: ${routedBy} → ${server.name}`);
 
-    // Build the chatGuid
+   // Build the chatGuid
     const chatGuid = chatGuidForPhone(e164);
 
-    // Remember outbound to prevent echo
-    const hasAttachmentsForEcho = Array.isArray(attachmentUrl) ? attachmentUrl.length > 0 : !!attachmentUrl;
-    rememberOutbound(String(message || ""), chatGuid, hasAttachmentsForEcho, server.id);
+    // Build attachment list (needed for GHL upload later)
+    const attachmentList = Array.isArray(attachmentUrl) ? attachmentUrl : (attachmentUrl ? [attachmentUrl] : []);
 
+    // Determine if we have attachments for echo prevention
+    const hasAttachmentsForEcho = attachmentList.length > 0;
+
+    // v4.1.0 FIX #3: Remember this message to prevent duplicate sends via provider webhook
+    rememberActionMessage(e164, message);
+
+    // Remember outbound to prevent echo
+    rememberOutbound(String(message || ""), chatGuid, hasAttachmentsForEcho, server.id);
     // Send the text message
     let textMessageSent = false;
     let data = null;
@@ -2215,7 +2387,6 @@ const finalLocationId = locationId || extras.locationId;
 
    // Send attachment if provided
     let attachmentSent = false;
-    const attachmentList = Array.isArray(attachmentUrl) ? attachmentUrl : (attachmentUrl ? [attachmentUrl] : []);
     
     for (const attachment of attachmentList) {
       try {
@@ -2259,71 +2430,86 @@ const finalLocationId = locationId || extras.locationId;
         console.error(`[action/send-imessage] Attachment failed:`, e.message);
       }
     }
-// Push the sent message to GHL conversation thread so it appears in CRM
-    if ((textMessageSent || attachmentSent) && finalContactId && finalLocationId) {
-      try {
-        const accessToken = await getValidAccessToken(finalLocationId);
-        if (accessToken) {
-          // Build attachment URLs array for GHL
-          let mediaUrls = [];
-          if (attachmentSent && attachmentList.length > 0) {
-            for (const att of attachmentList) {
-              const url = typeof att === 'string' ? att : (att.url || att.src || att.mediaUrl);
-              if (url) mediaUrls.push(url);
+// ========================================================================
+// v4.1.0 FIX #1 & #2: Push to GHL as OUTBOUND (RIGHT side) with proper attachments
+// ========================================================================
+if ((textMessageSent || attachmentSent) && finalContactId && finalLocationId) {
+try {
+const accessToken = await getValidAccessToken(finalLocationId);
+if (accessToken) {
+// Get or create conversation
+const convSearchResponse = await axios.get(
+`${LC_API}/conversations/search?locationId=${encodeURIComponent(finalLocationId)}&contactId=${encodeURIComponent(finalContactId)}`,
+{ headers: lcHeaders(accessToken), timeout: 15000 }
+);
+      let conversationId = convSearchResponse.data?.conversations?.[0]?.id;
+      console.log(`[action/send-imessage] Conversation search result: conversationId=${conversationId}`);
+      
+      if (!conversationId) {
+        const newConvResponse = await axios.post(
+          `${LC_API}/conversations`,
+          { locationId: finalLocationId, contactId: finalContactId },
+          { headers: lcHeaders(accessToken), timeout: 15000 }
+        );
+        conversationId = newConvResponse.data?.conversation?.id || newConvResponse.data?.id;
+      }
+
+      if (conversationId) {
+        // v4.1.0 FIX #2: Upload attachments to GHL first, then use GHL URLs
+        let ghlAttachmentUrls = [];
+        
+        for (const attachment of attachmentList) {
+          try {
+            const url = typeof attachment === 'string' ? attachment : (attachment.url || attachment.src || attachment.mediaUrl);
+            if (!url) continue;
+            
+            const downloadResult = await downloadGHLAttachment(url);
+            if (downloadResult && downloadResult.buffer) {
+              const { buffer, mimeType } = downloadResult;
+              let filename = (typeof attachment === 'object' && attachment.name) 
+                ? attachment.name 
+                : url.split('/').pop()?.split('?')[0] || 'attachment';
+                
+              if (!filename.includes('.')) {
+                const extMap = {
+                  'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
+                  'application/pdf': '.pdf', 'video/mp4': '.mp4',
+                };
+                filename += (extMap[mimeType] || '');
+              }
+              
+              // Upload to GHL conversations endpoint
+              const ghlUrl = await uploadAttachmentToGHLConversation(
+                finalLocationId, accessToken, buffer, filename, conversationId
+              );
+              if (ghlUrl) {
+                ghlAttachmentUrls.push(ghlUrl);
+                console.log(`[action/send-imessage] Uploaded to GHL: ${ghlUrl}`);
+              }
             }
-          }
-
-          // First, get or create conversation for this contact
-          const convSearchResponse = await axios.get(
-            `${LC_API}/conversations/search?locationId=${encodeURIComponent(finalLocationId)}&contactId=${encodeURIComponent(finalContactId)}`,
-            { headers: lcHeaders(accessToken), timeout: 15000 }
-          );
-          
-          let conversationId = convSearchResponse.data?.conversations?.[0]?.id;
-console.log(`[action/send-imessage] Conversation search result: conversationId=${conversationId}`);
-          
-          if (!conversationId) {
-            // Create new conversation
-            const newConvResponse = await axios.post(
-              `${LC_API}/conversations`,
-              {
-                locationId: finalLocationId,
-                contactId: finalContactId,
-              },
-              { headers: lcHeaders(accessToken), timeout: 15000 }
-            );
-            conversationId = newConvResponse.data?.conversation?.id || newConvResponse.data?.id;
-          }
-
-          if (conversationId) {
-            // Send outbound message (appears on RIGHT side)
-            const messageBody = {
-              type: "Custom",
-              contactId: finalContactId,
-              conversationId: conversationId,
-              message: message || (mediaUrls.length > 0 ? `📎 ${mediaUrls.length} attachment(s)` : ''),
-              conversationProviderId: CONVERSATION_PROVIDER_ID,
-            };
-
-            if (mediaUrls.length > 0) {
-              messageBody.attachments = mediaUrls;
-            }
-
-            const outboundResponse = await axios.post(
-              `${LC_API}/conversations/messages`,
-              messageBody,
-              { headers: lcHeaders(accessToken), timeout: 20000 }
-            );
-
-            console.log(`[action/send-imessage] ✅ Message logged to GHL conversation (outbound)`, outboundResponse.data);
-          } else {
-            console.error(`[action/send-imessage] Could not find or create conversation for contact ${finalContactId}`);
+          } catch (e) {
+            console.error(`[action/send-imessage] GHL attachment upload failed:`, e.message);
           }
         }
-      } catch (e) {
-        console.error(`[action/send-imessage] Failed to log to GHL:`, e?.response?.data || e.message);
+
+        // v4.1.0 FIX #1: Push OUTBOUND message (appears on RIGHT side)
+        await pushOutboundToGHL({
+          locationId: finalLocationId,
+          accessToken,
+          contactId: finalContactId,
+          conversationId,
+          text: message || (ghlAttachmentUrls.length > 0 ? `📎 ${ghlAttachmentUrls.length} attachment(s)` : ''),
+          attachmentUrls: ghlAttachmentUrls,
+        });
+      } else {
+        console.error(`[action/send-imessage] Could not find or create conversation`);
       }
     }
+  } catch (e) {
+    console.error(`[action/send-imessage] GHL push failed:`, e?.response?.data || e.message);
+  }
+}
+// ========================================================================
     // Store paused workflow data if Pause Execution is enabled
     const workflowExtras = req.body.extras || {};
     if (workflowExtras.workflowId && workflowExtras.stepId && workflowExtras.key) {
@@ -2544,7 +2730,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "4.0.0",
+    version: "4.1.0",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -3126,7 +3312,7 @@ setInterval(checkTokenHealth, TOKEN_CHECK_INTERVAL);
   
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 4.0.0 - Workflow Wait for Reply! 🎯✨`);
+    console.log(`[bridge] VERSION 4.1.0 - Messages on RIGHT side + Attachments Fixed! 🎯✨`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
