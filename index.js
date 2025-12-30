@@ -2532,7 +2532,7 @@ const convSearchResponse = await axios.get(
 // ========================================================================
     // Store paused workflow data if Pause Execution is enabled
     const workflowExtras = req.body.extras || {};
-    if (workflowExtras.workflowId && workflowExtras.stepId && workflowExtras.key) {
+    if (workflowExtras.workflowId && workflowExtras.stepId) {
       pausedWorkflows.set(e164, {
         extras: {
           contactId: workflowExtras.contactId || finalContactId,
