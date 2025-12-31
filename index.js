@@ -2621,6 +2621,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
       {
         headers: {
           'Content-Type': 'application/json',
+          'Version': '2021-07-28',
         },
         timeout: 15000,
       }
