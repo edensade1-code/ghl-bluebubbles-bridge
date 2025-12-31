@@ -2542,6 +2542,7 @@ const convSearchResponse = await axios.get(
           stepId: workflowExtras.stepId,
           workflowId: workflowExtras.workflowId,
           stepIndex: workflowExtras.stepIndex,
+          authHeader: req.headers.authorization,
         },
         timestamp: Date.now(),
         message: message,
@@ -2622,7 +2623,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
         headers: {
           'Content-Type': 'application/json',
           'Version': '2021-07-28',
-          'Authorization': `Bearer ${await getValidAccessToken(pausedData.extras.locationId)}`,
+          'Authorization': pausedData.extras.authHeader,
         },
         timeout: 15000,
       }
