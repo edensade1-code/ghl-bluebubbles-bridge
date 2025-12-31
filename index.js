@@ -2536,7 +2536,7 @@ const convSearchResponse = await axios.get(
       pausedWorkflows.set(e164, {
         extras: {
           contactId: workflowExtras.contactId || finalContactId,
-          key: workflowExtras.key,
+          key: req.body.meta?.key || 'send_imessage_e',
           locationId: workflowExtras.locationId || finalLocationId,
           statusId: workflowExtras.statusId,
           stepId: workflowExtras.stepId,
@@ -2607,7 +2607,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
 
   try {
     const response = await axios.post(
-      'https://services.leadconnectorhq.com/workflows-marketplace/actions/resume-internal-action',
+      'https://services.leadconnectorhq.com/workflows-marketplace/actions/resume-action',
       {
         success: true,
         successMessage: "Contact replied via iMessage",
@@ -2623,6 +2623,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
       {
         headers: {
           'Content-Type': 'application/json',
+          'Version': '2021-07-28',
         },
         timeout: 15000,
       }
