@@ -2622,6 +2622,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
         headers: {
           'Content-Type': 'application/json',
           'Version': '2021-07-28',
+          'Authorization': `Bearer ${await getValidAccessToken(pausedData.extras.locationId)}`,
         },
         timeout: 15000,
       }
