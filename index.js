@@ -2603,6 +2603,7 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
   }
 
   console.log(`[resume-workflow] Found paused workflow for ${contactPhone}, resuming...`);
+  console.log('[resume-workflow] DEBUG - Request details:', JSON.stringify(pausedData.extras, null, 2));
 
   try {
     const response = await axios.post(
@@ -2622,8 +2623,6 @@ async function resumePausedWorkflow(contactPhone, replyMessage) {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Version': '2021-07-28',
-          'Authorization': pausedData.extras.authHeader,
         },
         timeout: 15000,
       }
