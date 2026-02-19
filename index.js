@@ -1550,12 +1550,6 @@ async function pushOutboundToGHL({
 /* Used for delivery receipts, read receipts, and SMS-fallback warnings       */
 /* ============================================================================ */
 async function pushStatusToGHL({ locationId, accessToken, contactId, statusText }) {
-  // v4.2.1: Disabled — status messages clutter the GHL conversation thread.
-  // Receipts are still tracked internally in messageStatusTracker.
-  // Will re-enable when we have a proper widget/dashboard for delivery status.
-  console.log(`[status] DISABLED — would push: "${statusText}" → contact ${contactId}`);
-  return null;
-
   if (!contactId || !statusText) {
     console.log(`[status] Skipping push - missing contactId or statusText`);
     return null;
