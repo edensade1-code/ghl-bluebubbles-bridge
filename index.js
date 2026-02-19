@@ -3167,6 +3167,61 @@ app.get("/health/tokens", async (req, res) => {
  * Force send a test alert
  * GET /health/test-alert
  */
+/* -------------------------------------------------------------------------- */
+/* Token Sync — Push tokens to Render env var with one click                  */
+/* -------------------------------------------------------------------------- */
+app.get("/token-sync", async (req, res) => {
+  try {
+    const arr = Array.from(tokenStore.entries());
+    if (arr.length === 0) {
+      return res.status(400).json({ ok: false, error: "No tokens in memory. Complete OAuth flow first." });
+    }
+
+    const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
+    const renderApiKey = process.env.RENDER_API_KEY;
+    const renderServiceId = process.env.RENDER_SERVICE_ID;
+
+    if (!renderApiKey || !renderServiceId) {
+      return res.json({
+        ok: false,
+        error: "RENDER_API_KEY or RENDER_SERVICE_ID not set in env vars",
+        base64_length: base64.length,
+        manual_value: base64
+      });
+    }
+
+    // Push to Render env var
+    const resp = await axios.put(
+      `https://api.render.com/v1/services/${renderServiceId}/env-vars/GHL_TOKENS_BASE64`,
+      { value: base64 },
+      { headers: { "Authorization": `Bearer ${renderApiKey}`, "Content-Type": "application/json" } }
+    );
+
+    // Also update GHL_TOKEN_STORE for backwards compat
+    await axios.put(
+      `https://api.render.com/v1/services/${renderServiceId}/env-vars/GHL_TOKEN_STORE`,
+      { value: base64 },
+      { headers: { "Authorization": `Bearer ${renderApiKey}`, "Content-Type": "application/json" } }
+    ).catch(() => {});
+
+    console.log("[token-sync] Tokens pushed to Render env vars successfully");
+    
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Token Sync</title></head>
+<body style="background:#0f172a;color:#e5e7eb;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="max-width:500px;text-align:center;padding:40px">
+<div style="font-size:48px;margin-bottom:20px">&#9989;</div>
+<h1 style="color:#10b981;margin-bottom:10px">Tokens Synced to Render</h1>
+<p style="color:#9ca3af">GHL_TOKENS_BASE64 updated successfully.<br>Tokens will persist across restarts.</p>
+<p style="margin-top:20px;color:#6b7280;font-size:13px">${arr.length} location(s) synced &bull; ${new Date().toLocaleString('en-US', {timeZone:'America/New_York'})}</p>
+</div></body></html>`;
+    
+    res.type('html').send(html);
+  } catch (err) {
+    console.error("[token-sync] Error:", err?.response?.data || err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/health/test-alert", async (req, res) => {
   await sendHealthAlert("🧪 TEST ALERT - Health monitoring is working!");
   res.json({ 
