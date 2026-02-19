@@ -1,7 +1,26 @@
-// index.js - VERSION 4.1.0 (2025-12-29)
+// index.js - VERSION 4.2.0 (2026-02-18)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
+// ============================================================================
+// CHANGELOG v4.2.0:
+// - ADDED: Read/Delivery receipt processing from BlueBubbles updated-message events
+//   * Pushes "Delivered via iMessage", "Read X:XX PM" status to GHL thread (no emoji)
+//   * Pushes "Sent as SMS (contact may not have iMessage)" if message fell back to SMS
+//   * Pushes "Delivered via RCS" for RCS-delivered messages
+// - ADDED: messageStatusTracker Map - tracks outbound message guids for 24 hours
+// - ADDED: MESSAGE_STATUS_TTL_MS constant (24 hours)
+// - ADDED: trackOutboundMessage() helper - records sent messages for status tracking
+// - ADDED: pushStatusToGHL() function - pushes lightweight status notes to GHL thread
+// - ADDED: iMessage vs SMS detection in updated-message webhook
+//   * Checks data.service field to detect SMS fallback
+//   * Warns in GHL if contact doesn't have iMessage
+//   * Lazy contactId lookup for messages tracked without contactId (provider-send path)
+// - ADDED: custom-js-v2.js - Enhanced GHL Marketplace Custom JS with CSS injection
+//   * Apple-style iMessage glow on outbound bubbles
+//   * MutationObserver to style status messages as small gray text indicators (no emoji)
+//   * CSS ::before pseudo-elements with unicode checkmarks (like WhatsApp delivery ticks)
+//   * iMessage tab visual blue glow indicator
 // ============================================================================
 // CHANGELOG v4.1.0:
 // - FIXED: Messages now appear on RIGHT side in GHL (outbound direction)
@@ -475,6 +494,37 @@ const recentOutboundMessages = new Map();
 const recentInboundKeys = new Map();
 const recentOutboundAttachmentChats = new Map();
 const outboundServerMap = new Map(); // Track which server sent each message
+// ============================================================================
+// v4.2.0: Track outbound message guids for delivery/read receipt processing
+// guid -> { ghlContactId, ghlLocationId, ghlContactPhone, delivered, read, smsWarned, service, timestamp }
+// ============================================================================
+const messageStatusTracker = new Map();
+const MESSAGE_STATUS_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Record an outbound message so we can push status updates when receipts arrive
+const trackOutboundMessage = (guid, { phone, locationId, contactId, service = 'iMessage' } = {}) => {
+  if (!guid) return;
+  messageStatusTracker.set(guid, {
+    ghlContactId: contactId || null,
+    ghlLocationId: locationId || null,
+    ghlContactPhone: phone || null,
+    delivered: false,
+    read: false,
+    smsWarned: false,
+    service,
+    timestamp: Date.now(),
+  });
+  console.log(`[status-tracker] Tracking outbound: guid=${guid}, phone=${phone}, service=${service}`);
+
+  // Prune stale entries
+  if (messageStatusTracker.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of messageStatusTracker.entries()) {
+      if (now - v.timestamp > MESSAGE_STATUS_TTL_MS) messageStatusTracker.delete(k);
+    }
+  }
+};
+
 // ============================================================================
 // v4.1.0 FIX #3: Track workflow action messages to prevent duplicates
 // ============================================================================
@@ -1495,6 +1545,37 @@ async function pushOutboundToGHL({
   }
 }
 
+/* ============================================================================ */
+/* v4.2.0: Push a short status note to GHL conversation thread                */
+/* Used for delivery receipts, read receipts, and SMS-fallback warnings       */
+/* ============================================================================ */
+async function pushStatusToGHL({ locationId, accessToken, contactId, statusText }) {
+  if (!contactId || !statusText) {
+    console.log(`[status] Skipping push - missing contactId or statusText`);
+    return null;
+  }
+  try {
+    console.log(`[status] Pushing status to GHL: "${statusText}" → contact ${contactId}`);
+    const body = {
+      locationId,
+      contactId,
+      message: statusText,
+      type: "Custom",
+      conversationProviderId: CONVERSATION_PROVIDER_ID,
+      altType: "iMessage",
+    };
+    const r = await axios.post(`${LC_API}/conversations/messages/inbound`, body, {
+      headers: lcHeaders(accessToken),
+      timeout: 15000,
+    });
+    console.log(`[status] ✅ Status pushed: "${statusText}"`);
+    return r.data;
+  } catch (e) {
+    console.error(`[status] ❌ Failed to push status:`, e?.response?.data || e.message);
+    return null;
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Push Messages to GHL with Attachments                                      */
 /* -------------------------------------------------------------------------- */
@@ -1789,6 +1870,20 @@ provider: "eden-imessage",
       rememberOutbound("", chatGuid, true, server.id);
     }
 
+    // v4.2.0: Track outbound message guid for delivery/read receipt processing
+    if (textMessageSent && data) {
+      const msgGuid = data?.guid || data?.data?.guid;
+      if (msgGuid) {
+        const anyLoc = getAnyLocation();
+        trackOutboundMessage(msgGuid, {
+          phone: e164,
+          locationId: anyLoc?.locationId || null,
+          contactId: null, // looked up lazily when receipt arrives
+          service: 'iMessage',
+        });
+      }
+    }
+
     let successfulAttachments = 0;
     if (attachmentsFromBody.length > 0) {
       console.log(`[provider] sending ${attachmentsFromBody.length} attachment(s) to ${server.name}`);
@@ -1889,12 +1984,126 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     console.log("[inbound] RAW WEBHOOK PAYLOAD:", JSON.stringify(req.body, null, 2));
 
     // ========================================================================
-    // V3.7.8 FIX: Ignore "updated-message" events to prevent duplicates
+    // V4.2.0: Process "updated-message" events for delivery/read receipts
+    // Previously ignored; now selectively processes status updates.
     // ========================================================================
     const webhookType = src.type || src.event || null;
     if (webhookType === 'updated-message' || webhookType === 'message-updated') {
-      console.log("[inbound] IGNORING - webhook type is 'updated-message' (prevents duplicates)");
-      return res.status(200).json({ ok: true, ignored: "updated-message" });
+      console.log("[inbound] Processing 'updated-message' event for read/delivery receipts");
+
+      const msgGuid = data.guid || data.message?.guid;
+      const dateDelivered = data.dateDelivered ?? data.message?.dateDelivered ?? null;
+      const dateRead = data.dateRead ?? data.message?.dateRead ?? null;
+      const service = data.service || data.message?.service || 'iMessage';
+
+      if (!msgGuid) {
+        console.log("[inbound] No guid in updated-message, ignoring");
+        return res.status(200).json({ ok: true, ignored: "updated-message-no-guid" });
+      }
+
+      // Look up this message in our outbound status tracker
+      const tracked = messageStatusTracker.get(msgGuid);
+      if (!tracked) {
+        console.log(`[inbound] guid ${msgGuid} not in status tracker — ignoring updated-message`);
+        return res.status(200).json({ ok: true, ignored: "untracked-guid" });
+      }
+
+      console.log(`[inbound] Found tracked message: guid=${msgGuid}, phone=${tracked.ghlContactPhone}`);
+
+      // Get OAuth tokens
+      const statusLocation = tracked.ghlLocationId || getAnyLocation()?.locationId;
+      if (!statusLocation) {
+        console.log("[inbound] No locationId for status push");
+        return res.status(200).json({ ok: true, note: "no-oauth-for-status" });
+      }
+      const statusToken = await getValidAccessToken(statusLocation);
+      if (!statusToken) {
+        console.log("[inbound] No access token for status push");
+        return res.status(200).json({ ok: true, note: "no-token-for-status" });
+      }
+
+      // Lazy contactId lookup (provider-send path stores phone, not contactId)
+      if (!tracked.ghlContactId && tracked.ghlContactPhone) {
+        console.log(`[inbound] Lazy contactId lookup for ${tracked.ghlContactPhone}`);
+        const resolvedId = await findContactIdByPhone(statusLocation, tracked.ghlContactPhone);
+        if (resolvedId) {
+          tracked.ghlContactId = resolvedId;
+          messageStatusTracker.set(msgGuid, tracked);
+          console.log(`[inbound] Resolved contactId: ${resolvedId}`);
+        } else {
+          console.log(`[inbound] Contact not found in GHL for ${tracked.ghlContactPhone}, cannot push status`);
+          return res.status(200).json({ ok: true, note: "contact-not-found-for-status" });
+        }
+      }
+
+      if (!tracked.ghlContactId) {
+        console.log("[inbound] No contactId available for status push");
+        return res.status(200).json({ ok: true, ignored: "no-contact-for-status" });
+      }
+
+      // Update service if it changed (e.g. iMessage → SMS fallback)
+      if (service && service !== tracked.service) {
+        console.log(`[inbound] Service changed: ${tracked.service} → ${service}`);
+        tracked.service = service;
+        messageStatusTracker.set(msgGuid, tracked);
+      }
+
+      let pushed = false;
+
+      // SMS fallback warning (push once)
+      if (service === 'SMS' && !tracked.smsWarned) {
+        tracked.smsWarned = true;
+        messageStatusTracker.set(msgGuid, tracked);
+        await pushStatusToGHL({
+          locationId: statusLocation,
+          accessToken: statusToken,
+          contactId: tracked.ghlContactId,
+          statusText: `Sent as SMS (contact may not have iMessage)`,
+        });
+        pushed = true;
+      }
+
+      // Delivery receipt (push once)
+      if (dateDelivered && !tracked.delivered) {
+        tracked.delivered = true;
+        messageStatusTracker.set(msgGuid, tracked);
+        const ts = new Date(typeof dateDelivered === 'number' ? dateDelivered : Date.now());
+        const timeStr = ts.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: TIMEZONE });
+        let statusText;
+        if (service === 'SMS') {
+          statusText = `Sent as SMS · Delivered ${timeStr}`;
+        } else if (service === 'RCS') {
+          statusText = `Delivered via RCS · ${timeStr}`;
+        } else {
+          statusText = `Delivered via iMessage · ${timeStr}`;
+        }
+        await pushStatusToGHL({
+          locationId: statusLocation,
+          accessToken: statusToken,
+          contactId: tracked.ghlContactId,
+          statusText,
+        });
+        pushed = true;
+        console.log(`[inbound] ✅ Delivery receipt pushed for guid ${msgGuid}`);
+      }
+
+      // Read receipt (push once)
+      if (dateRead && !tracked.read) {
+        tracked.read = true;
+        messageStatusTracker.set(msgGuid, tracked);
+        const ts = new Date(typeof dateRead === 'number' ? dateRead : Date.now());
+        const timeStr = ts.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: TIMEZONE });
+        await pushStatusToGHL({
+          locationId: statusLocation,
+          accessToken: statusToken,
+          contactId: tracked.ghlContactId,
+          statusText: `Read ${timeStr}`,
+        });
+        pushed = true;
+        console.log(`[inbound] ✅ Read receipt pushed for guid ${msgGuid}`);
+      }
+
+      return res.status(200).json({ ok: true, statusUpdate: pushed, guid: msgGuid });
     }
 
     const messageText =
@@ -2405,6 +2614,19 @@ const finalLocationId = locationId || extras.locationId;
       }
     }
 
+   // v4.2.0: Track outbound message guid for delivery/read receipt processing
+    if (textMessageSent && data) {
+      const msgGuid = data?.guid || data?.data?.guid;
+      if (msgGuid) {
+        trackOutboundMessage(msgGuid, {
+          phone: e164,
+          locationId: finalLocationId || null,
+          contactId: finalContactId || null,
+          service: 'iMessage',
+        });
+      }
+    }
+
    // Send attachment if provided
     let attachmentSent = false;
     
@@ -2754,7 +2976,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     name: "ghl-bluebubbles-bridge",
-    version: "4.1.0",
+    version: "4.2.0",
     mode: "single-provider-multi-server-routing-optional-private-api-server-locking",
     servers: BLUEBUBBLES_SERVERS.map(s => ({
       id: s.id,
@@ -3140,7 +3362,7 @@ app.get("/calling", (req, res) => {
           <button id="callBtn" onclick="makeCall()">Call Now</button>
           <button class="cancel" onclick="window.close()">Cancel</button>
         </div>
-        <div class="powered-by">Powered by Eden Bridge v4.0.0</div>
+        <div class="powered-by">Powered by Eden Bridge v4.2.0</div>
       </div>
       
       <script>
@@ -3289,7 +3511,7 @@ app.get("/conversations", (req, res) => {
         <div class="phone">${phoneNumber}</div>
         <p>Send messages from GHL conversations or use the iMessage app on your Mac/iPhone!</p>
         <button onclick="window.close()">Close</button>
-        <div class="powered-by">Powered by Eden Bridge v4.0.0</div>
+        <div class="powered-by">Powered by Eden Bridge v4.2.0</div>
       </div>
     </body>
     </html>
@@ -3336,7 +3558,7 @@ setInterval(checkTokenHealth, TOKEN_CHECK_INTERVAL);
   
   app.listen(PORT, () => {
     console.log(`[bridge] listening on :${PORT}`);
-    console.log(`[bridge] VERSION 4.1.0 - Messages on RIGHT side + Attachments Fixed! 🎯✨`);
+    console.log(`[bridge] VERSION 4.2.0 - Read/Delivery Receipts + SMS Detection! 🎯✨📬`);
     console.log("");
     console.log("📋 BlueBubbles Servers:");
     for (const server of BLUEBUBBLES_SERVERS) {
