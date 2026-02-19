@@ -2930,21 +2930,42 @@ app.all("/oauth/callback", async (req, res) => {
 
     return res
       .status(200)
-      .send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;padding:20px">
-<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:24px;max-width:800px;margin:0 auto;box-shadow:0 10px 30px rgba(0,0,0,.3)">
-<h1 style="color:#10b981">✅ Eden iMessage connected</h1>
-<p>Location: <code style="background:#1f2937;padding:4px 8px;border-radius:6px">${locationId}</code></p>
-<div style="margin-top:20px;padding:16px;background:#1f2937;border-radius:8px">
-<strong style="color:#fbbf24">⚠️ IMPORTANT: Add this to Render Environment Variables</strong>
-<p style="margin:10px 0 5px;font-size:14px">This will persist your tokens across restarts:</p>
-<div style="margin:10px 0"><strong>Key:</strong> <code style="background:#0b0b0c;padding:4px 8px;border-radius:4px">GHL_TOKENS_BASE64</code></div>
-<div style="margin:10px 0"><strong>Value:</strong></div>
-<textarea readonly style="width:100%;min-height:100px;background:#0b0b0c;color:#e5e7eb;border:1px solid #374151;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;resize:vertical">${base64}</textarea>
-<button onclick="navigator.clipboard.writeText('${base64}').then(()=>alert('Copied to clipboard!'))" style="margin-top:10px;background:#10b981;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer">📋 Copy Value</button>
+      .send(`<!doctype html><html><body style="font-family:system-ui;background:#0b0b0c;color:#e5e7eb;padding:20px;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="background:#111827;border:1px solid #1f2937;border-radius:14px;padding:40px;max-width:500px;margin:0 auto;box-shadow:0 10px 30px rgba(0,0,0,.3);text-align:center">
+<div style="font-size:48px;margin-bottom:16px">&#9989;</div>
+<h1 style="color:#10b981;margin-bottom:8px">Eden iMessage Connected</h1>
+<p style="color:#9ca3af;margin-bottom:24px">Location: <code style="background:#1f2937;padding:4px 8px;border-radius:6px">${locationId}</code></p>
+<button id="syncBtn" onclick="syncTokens()" style="background:#10b981;color:#fff;border:none;padding:14px 32px;border-radius:8px;cursor:pointer;font-size:16px;font-weight:600;width:100%;transition:all 0.2s">Sync to Render</button>
+<p id="status" style="margin-top:16px;font-size:13px;color:#6b7280"></p>
 </div>
-<p style="margin-top:20px;font-size:14px;color:#9ca3af">You can close this window after copying the value.</p>
-</div>
-<script>setTimeout(()=>{window.close?.();},60000)</script></body></html>`);
+<script>
+async function syncTokens() {
+  const btn = document.getElementById('syncBtn');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  btn.textContent = 'Syncing...';
+  status.textContent = '';
+  try {
+    const resp = await fetch('/token-sync');
+    if (resp.ok) {
+      btn.style.background = '#059669';
+      btn.textContent = 'Synced';
+      status.style.color = '#10b981';
+      status.textContent = 'Tokens saved to Render. You can close this window.';
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || 'Sync failed');
+    }
+  } catch (e) {
+    btn.style.background = '#ef4444';
+    btn.textContent = 'Sync Failed';
+    status.style.color = '#ef4444';
+    status.textContent = e.message;
+    setTimeout(() => { btn.disabled = false; btn.style.opacity = '1'; btn.style.background = '#10b981'; btn.textContent = 'Sync to Render'; }, 3000);
+  }
+}
+</script></body></html>`);
   } catch (e) {
     console.error("[oauth] callback error:", e?.response?.status, e?.response?.data || e.message);
     res.status(500).send("OAuth error. Check server logs for details.");
