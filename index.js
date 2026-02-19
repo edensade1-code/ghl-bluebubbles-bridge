@@ -1556,19 +1556,31 @@ async function pushStatusToGHL({ locationId, accessToken, contactId, statusText 
   }
   try {
     console.log(`[status] Pushing status to GHL: "${statusText}" → contact ${contactId}`);
+    
+    // First, find the conversation ID for this contact
+    const searchResp = await axios.get(`${LC_API}/conversations/search?locationId=${locationId}&contactId=${contactId}&limit=1`, {
+      headers: lcHeaders(accessToken),
+      timeout: 10000,
+    });
+    const conversations = searchResp.data?.conversations || [];
+    if (!conversations.length) {
+      console.log(`[status] No conversation found for contact ${contactId}`);
+      return null;
+    }
+    const conversationId = conversations[0].id;
+
+    // Send as outbound Custom message — appears on the right side (our side)
     const body = {
-      locationId,
-      contactId,
-      message: statusText,
       type: "Custom",
+      message: statusText,
+      conversationId,
       conversationProviderId: CONVERSATION_PROVIDER_ID,
-      altType: "iMessage",
     };
-    const r = await axios.post(`${LC_API}/conversations/messages/inbound`, body, {
+    const r = await axios.post(`${LC_API}/conversations/messages`, body, {
       headers: lcHeaders(accessToken),
       timeout: 15000,
     });
-    console.log(`[status] ✅ Status pushed: "${statusText}"`);
+    console.log(`[status] ✅ Status pushed as outbound: "${statusText}"`);
     return r.data;
   } catch (e) {
     console.error(`[status] ❌ Failed to push status:`, e?.response?.data || e.message);
