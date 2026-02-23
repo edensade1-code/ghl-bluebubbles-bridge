@@ -1,7 +1,19 @@
-// index.js - VERSION 4.2.0 (2026-02-18)
+// index.js - VERSION 5.0.0 (2026-02-23)
 // ============================================================================
 // PROJECT: Eden Bridge - Multi-Server BlueBubbles ↔ GHL
 // ============================================================================
+// ============================================================================
+// CHANGELOG v5.0.0:
+// - ADDED: Multi-location routing — bb4 now serves BOTH Amber (ASAP) and Randy (Rocket Home Deals)
+// - ADDED: Randy Novar as user on bb4 (userId: uZsh6k4s5BE5swncp1r8, parking: +17867888273)
+// - ADDED: locationId field to all user configs (parkingNumbers + phoneNumbers)
+// - ADDED: GHL_LOCATION_ASAP and GHL_LOCATION_ROCKET constants
+// - CHANGED: Inbound handler now searches multiple GHL locations when server has multi-location users
+//   * For bb4: searches ASAP location first, then Rocket Home Deals
+//   * Routes to whichever location contains the contact
+// - CHANGED: bb4 name updated to "Server 4 (Mac Mini - Amber & Randy)"
+// - ADDED: "randy" as explicit fromUser option in send-imessage action
+// - BACKWARDS COMPATIBLE: Single-location servers (bb1/bb2/bb3) work exactly as before
 // ============================================================================
 // CHANGELOG v4.2.0:
 // - ADDED: Read/Delivery receipt processing from BlueBubbles updated-message events
@@ -211,6 +223,14 @@ const GHL_USER_ID_EDEN = "11umP2K61R5cuEoadD9x";
 const GHL_USER_ID_MARIO = "7XskZuGiwXLneiUx10ne";
 const GHL_USER_ID_TIFFANY = "BQAAlsqc9xdibpaxZP3q";
 const GHL_USER_ID_AMBER = "SbeaaZLaNSaWIeeljIbB";
+const GHL_USER_ID_RANDY = "uZsh6k4s5BE5swncp1r8";
+
+// GHL Location IDs
+const GHL_LOCATION_ASAP = "Wiw6FjEVf52zbIJXOchc";
+const GHL_LOCATION_ROCKET = "caTq6MFm4c1YbDgviLcY";
+
+// Parking number for Randy
+const PARKING_NUMBER_RANDY = (process.env.PARKING_NUMBER_RANDY || "+17867888273").trim();
 
 /* -------------------------------------------------------------------------- */
 /* Health Monitoring Functions - section 1                                    */
@@ -249,11 +269,11 @@ const BLUEBUBBLES_SERVERS = [
     password: process.env.BB_GUID || "REPLACE_WITH_SERVER1_PASSWORD",
     usePrivateAPI: false,  // ← Private API not enabled on bb1
     parkingNumbers: [
-      { number: PARKING_NUMBER_EDEN, userId: GHL_USER_ID_EDEN, user: "Eden" },
+      { number: PARKING_NUMBER_EDEN, userId: GHL_USER_ID_EDEN, user: "Eden", locationId: GHL_LOCATION_ASAP },
     ],
     // iMessage phone numbers handled by this server
     phoneNumbers: [
-      { number: "+13058337256", parkingNumber: PARKING_NUMBER_EDEN, userId: GHL_USER_ID_EDEN, user: "Eden" },
+      { number: "+13058337256", parkingNumber: PARKING_NUMBER_EDEN, userId: GHL_USER_ID_EDEN, user: "Eden", locationId: GHL_LOCATION_ASAP },
     ],
   },
   {
@@ -262,13 +282,13 @@ const BLUEBUBBLES_SERVERS = [
     enabled: true,
     baseUrl: "https://bb2.asapcashhomebuyers.com",
     password: process.env.BB2_GUID || "EdenBridge2025Master",
-    usePrivateAPI: (process.env.BB2_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
+    usePrivateAPI: (process.env.BB2_USE_PRIVATE_API || "false").toLowerCase() === "true",
     parkingNumbers: [
-      { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
+      { number: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario", locationId: GHL_LOCATION_ASAP },
     ],
     // iMessage phone numbers handled by this server
     phoneNumbers: [
-      { number: "+13059273268", parkingNumber: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario" },
+      { number: "+13059273268", parkingNumber: PARKING_NUMBER_MARIO, userId: GHL_USER_ID_MARIO, user: "Mario", locationId: GHL_LOCATION_ASAP },
     ],
   },
   {
@@ -277,28 +297,30 @@ const BLUEBUBBLES_SERVERS = [
     enabled: true,
     baseUrl: "https://bb3.asapcashhomebuyers.com",
     password: process.env.BB3_GUID || "EdenBridge2025Master",
-    usePrivateAPI: (process.env.BB3_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
+    usePrivateAPI: (process.env.BB3_USE_PRIVATE_API || "false").toLowerCase() === "true",
     parkingNumbers: [
-      { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
+      { number: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany", locationId: GHL_LOCATION_ASAP },
     ],
     // iMessage phone numbers handled by this server
     phoneNumbers: [
-      { number: "+19544450020", parkingNumber: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany" },
+      { number: "+19544450020", parkingNumber: PARKING_NUMBER_TIFFANY, userId: GHL_USER_ID_TIFFANY, user: "Tiffany", locationId: GHL_LOCATION_ASAP },
     ],
   },
   {
     id: "bb4",
-    name: "Server 4 (Mac Mini - Amber)",
+    name: "Server 4 (Mac Mini - Amber & Randy)",
     enabled: true,
     baseUrl: "https://bb4.asapcashhomebuyers.com",
     password: process.env.BB4_GUID || "EdenBridge2025!",
-    usePrivateAPI: (process.env.BB4_USE_PRIVATE_API || "false").toLowerCase() === "true",  // ← Can toggle via env var
+    usePrivateAPI: (process.env.BB4_USE_PRIVATE_API || "false").toLowerCase() === "true",
     parkingNumbers: [
-      { number: PARKING_NUMBER_AMBER, userId: GHL_USER_ID_AMBER, user: "Amber" },
+      { number: PARKING_NUMBER_AMBER, userId: GHL_USER_ID_AMBER, user: "Amber", locationId: GHL_LOCATION_ASAP },
+      { number: PARKING_NUMBER_RANDY, userId: GHL_USER_ID_RANDY, user: "Randy", locationId: GHL_LOCATION_ROCKET },
     ],
-    // iMessage phone numbers handled by this server
+    // iMessage phone numbers handled by this server — shared number, two users
     phoneNumbers: [
-      { number: "+13054978748", parkingNumber: PARKING_NUMBER_AMBER, userId: GHL_USER_ID_AMBER, user: "Amber" },
+      { number: "+13054978748", parkingNumber: PARKING_NUMBER_AMBER, userId: GHL_USER_ID_AMBER, user: "Amber", locationId: GHL_LOCATION_ASAP },
+      { number: "+13054978748", parkingNumber: PARKING_NUMBER_RANDY, userId: GHL_USER_ID_RANDY, user: "Randy", locationId: GHL_LOCATION_ROCKET },
     ],
   },
 ];
@@ -2179,13 +2201,6 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
       return res.status(200).json({ ok: true, ignored: "bridge-sent" });
     }
 
-    const any = getAnyLocation();
-    if (!any) {
-      console.error("[inbound] NO OAUTH TOKENS");
-      return res.status(200).json({ ok: true, note: "no-oauth" });
-    }
-    const { locationId } = any;
-
     let contactE164 = null;
     try { contactE164 = ensureE164(fromRaw); } catch { contactE164 = null; }
     if (!contactE164 && chatGuid) {
@@ -2200,16 +2215,63 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
     const server = serverOverride || findServerForPhone(contactE164);
     console.log(`[inbound] message from ${server.name} for contact ${contactE164}`);
 
-    const contactId = await findContactIdByPhone(locationId, contactE164);
+    // v5.0.0: Multi-location routing — search all locations this server's users belong to
+    // Collect unique locationIds from this server's parking numbers
+    const serverLocationIds = [...new Set(
+      server.parkingNumbers
+        .map(p => p.locationId)
+        .filter(Boolean)
+    )];
+
+    let locationId = null;
+    let contactId = null;
+
+    if (serverLocationIds.length > 1) {
+      // Multi-location server (e.g., bb4 with Amber + Randy)
+      // Search each location for the contact
+      console.log(`[inbound] multi-location server — searching ${serverLocationIds.length} locations: ${serverLocationIds.join(', ')}`);
+      for (const locId of serverLocationIds) {
+        if (!tokenStore.has(locId)) {
+          console.log(`[inbound] no token for location ${locId}, skipping`);
+          continue;
+        }
+        const found = await findContactIdByPhone(locId, contactE164);
+        if (found) {
+          locationId = locId;
+          contactId = found;
+          console.log(`[inbound] ✅ contact found in location ${locId} (contactId: ${found})`);
+          break;
+        }
+      }
+    } else if (serverLocationIds.length === 1) {
+      // Single-location server — use it directly
+      locationId = serverLocationIds[0];
+      if (tokenStore.has(locationId)) {
+        contactId = await findContactIdByPhone(locationId, contactE164);
+      }
+    }
+
+    // Fallback: if no locationId from server config, use getAnyLocation()
+    if (!locationId) {
+      const any = getAnyLocation();
+      if (!any) {
+        console.error("[inbound] NO OAUTH TOKENS");
+        return res.status(200).json({ ok: true, note: "no-oauth" });
+      }
+      locationId = any.locationId;
+      if (!contactId) {
+        contactId = await findContactIdByPhone(locationId, contactE164);
+      }
+    }
+
     if (!contactId) {
-      console.log(`[inbound] CONTACT NOT FOUND IN GHL - ignoring message:`, {
-        locationId,
+      console.log(`[inbound] CONTACT NOT FOUND IN ANY GHL LOCATION - ignoring message:`, {
+        searchedLocations: serverLocationIds.length > 0 ? serverLocationIds : [locationId],
         phone: contactE164,
         isFromMe,
         messagePreview: messageText?.slice(0, 50),
         hasAttachments,
         server: server.name,
-        parkingNumber: server.parkingNumbers[0]?.number
       });
       return res.status(200).json({ ok: true, note: "no-contact" });
     }
@@ -2542,6 +2604,9 @@ const finalLocationId = locationId || extras.locationId;
       } else if (userLower === "amber") {
         server = BLUEBUBBLES_SERVERS[3]; // bb4
         routedBy = "explicit-amber";
+      } else if (userLower === "randy") {
+        server = BLUEBUBBLES_SERVERS[3]; // bb4 (shared with Amber)
+        routedBy = "explicit-randy";
       } else {
         server = BLUEBUBBLES_SERVERS[0]; // fallback
         routedBy = "fallback";
