@@ -3011,26 +3011,33 @@ async function syncTokens() {
   const btn = document.getElementById('syncBtn');
   const status = document.getElementById('status');
   btn.disabled = true;
-  btn.style.opacity = '0.6';
-  btn.textContent = 'Syncing...';
+  btn.style.opacity = '0.7';
+  btn.innerHTML = '⏳ Syncing...';
+  btn.style.background = '#f59e0b';
   status.textContent = '';
   try {
     const resp = await fetch('/token-sync');
     if (resp.ok) {
       btn.style.background = '#059669';
-      btn.textContent = 'Synced';
+      btn.style.transform = 'scale(1.05)';
+      btn.innerHTML = '✅ Synced Successfully!';
+      btn.style.fontSize = '18px';
       status.style.color = '#10b981';
-      status.textContent = 'Tokens saved to Render. You can close this window.';
+      status.style.fontSize = '15px';
+      status.innerHTML = '<br>✅ Tokens saved to Render. You can close this window.';
+      setTimeout(() => { btn.style.transform = 'scale(1)'; }, 300);
     } else {
       const data = await resp.json().catch(() => ({}));
       throw new Error(data.error || 'Sync failed');
     }
   } catch (e) {
     btn.style.background = '#ef4444';
-    btn.textContent = 'Sync Failed';
+    btn.style.transform = 'scale(1.05)';
+    btn.innerHTML = '❌ Sync Failed';
     status.style.color = '#ef4444';
+    status.style.fontSize = '15px';
     status.textContent = e.message;
-    setTimeout(() => { btn.disabled = false; btn.style.opacity = '1'; btn.style.background = '#10b981'; btn.textContent = 'Sync to Render'; }, 3000);
+    setTimeout(() => { btn.disabled = false; btn.style.opacity = '1'; btn.style.background = '#10b981'; btn.innerHTML = 'Sync to Render'; btn.style.transform = 'scale(1)'; }, 3000);
   }
 }
 </script></body></html>`);
