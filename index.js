@@ -961,6 +961,40 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
   console.log("[bridge] OAuth not configured (CLIENT_ID/CLIENT_SECRET missing).");
 }
 
+// v5.0.2: After loading tokens, resolve "default" tokens to their actual locationId
+// GHL sometimes doesn't return locationId in the OAuth response
+async function resolveDefaultToken() {
+  const defaultToken = tokenStore.get("default");
+  if (!defaultToken || !defaultToken.access_token) return;
+
+  // Check if "default" is the only unresolved token
+  const knownLocationIds = [...new Set(
+    BLUEBUBBLES_SERVERS.flatMap(s => s.parkingNumbers.map(p => p.locationId).filter(Boolean))
+  )];
+
+  for (const locId of knownLocationIds) {
+    if (tokenStore.has(locId)) continue; // Already have a token for this location
+
+    // Try using the default token to search this location
+    try {
+      const testResp = await axios.get(
+        `${LC_API}/contacts/?locationId=${encodeURIComponent(locId)}&limit=1`,
+        { headers: lcHeaders(defaultToken.access_token), timeout: 10000 }
+      );
+      if (testResp.status === 200) {
+        console.log(`[oauth] ✅ "default" token works for location ${locId} — remapping`);
+        tokenStore.set(locId, defaultToken);
+        tokenStore.delete("default");
+        await saveTokenStore();
+        return;
+      }
+    } catch (e) {
+      console.log(`[oauth] "default" token does NOT work for ${locId}: ${e?.response?.status || e.message}`);
+    }
+  }
+  console.log("[oauth] could not resolve 'default' token to any known location");
+}
+
 /* -------------------------------------------------------------------------- */
 /* Phone Number Helpers                                                       */
 /* -------------------------------------------------------------------------- */
@@ -2987,7 +3021,45 @@ app.all("/oauth/callback", async (req, res) => {
     const tokens = tokenRes.data || {};
     tokens._created_at_ms = Date.now();
 
-    const locationId = tokens.locationId || tokens.location_id || tokens.location || "default";
+    let locationId = tokens.locationId || tokens.location_id || tokens.location || null;
+
+    // v5.0.2: If GHL doesn't return locationId, try to detect it from the access token
+    // by calling the GHL API to get the location info
+    if (!locationId) {
+      try {
+        const locResp = await axios.get(`${LC_API}/locations/search`, {
+          headers: { ...lcHeaders(tokens.access_token) },
+          timeout: 10000,
+        });
+        const locs = locResp?.data?.locations || [];
+        if (locs.length === 1) {
+          locationId = locs[0].id;
+          console.log("[oauth] detected locationId from API:", locationId);
+        }
+      } catch (e) {
+        console.log("[oauth] could not detect locationId:", e?.response?.status, e?.message);
+      }
+    }
+
+    // v5.0.2: If still no locationId, try getting it from the token's companyId or userId
+    if (!locationId && tokens.userId) {
+      try {
+        const userResp = await axios.get(`${LC_API}/users/${tokens.userId}`, {
+          headers: { ...lcHeaders(tokens.access_token) },
+          timeout: 10000,
+        });
+        const roles = userResp?.data?.roles || {};
+        if (roles.locationIds && roles.locationIds.length === 1) {
+          locationId = roles.locationIds[0];
+          console.log("[oauth] detected locationId from user roles:", locationId);
+        }
+      } catch (e) {
+        console.log("[oauth] could not detect locationId from user:", e?.message);
+      }
+    }
+
+    if (!locationId) locationId = "default";
+
     tokenStore.set(locationId, tokens);
     await saveTokenStore();
 
@@ -3687,6 +3759,7 @@ app.post("/call-initiated", async (req, res) => {
 
 (async function() {
   await loadTokenStore();
+  await resolveDefaultToken();
 /* -------------------------------------------------------------------------- */
 /* Health Monitoring Functions - section 4                                    */
 /* -------------------------------------------------------------------------- */
