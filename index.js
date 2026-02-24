@@ -234,6 +234,13 @@ const GHL_USER_ID_RANDY = "uZsh6k4s5BE5swncp1r8";
 const GHL_LOCATION_ASAP = "Wiw6FjEVf52zbIJXOchc";
 const GHL_LOCATION_ROCKET = "caTq6MFm4c1YbDgviLcY";
 
+// v5.0.6: Static location API keys (never expire, no OAuth needed)
+// These are Private Integration keys — one per location, no conflicts
+const LOCATION_API_KEYS = {
+  [GHL_LOCATION_ASAP]: process.env.GHL_API_KEY_ASAP || "pit-cb0af47b-a634-4aec-9e32-4753dde0888a",
+  [GHL_LOCATION_ROCKET]: process.env.GHL_API_KEY_ROCKET || "pit-17c16b28-9295-499d-b563-fb2b8ffa132b",
+};
+
 // Parking number for Randy
 const PARKING_NUMBER_RANDY = (process.env.PARKING_NUMBER_RANDY || "+17867888273").trim();
 
@@ -1214,6 +1221,10 @@ const getAnyLocation = () => {
 const tokenRefreshLocks = new Map();
 
 async function getValidAccessToken(locationId) {
+  // v5.0.6: Prefer static location API keys (never expire, no OAuth conflicts)
+  const staticKey = LOCATION_API_KEYS[locationId];
+  if (staticKey) return staticKey;
+
   const row = tokenStore.get(locationId);
   if (!row) return null;
 
