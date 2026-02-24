@@ -1220,11 +1220,12 @@ const getAnyLocation = () => {
 
 const tokenRefreshLocks = new Map();
 
-async function getValidAccessToken(locationId) {
-  // v5.0.6: Prefer static location API keys (never expire, no OAuth conflicts)
-  const staticKey = LOCATION_API_KEYS[locationId];
-  if (staticKey) return staticKey;
+// v5.0.7: Static keys for contact lookup, OAuth for conversation provider operations
+function getStaticApiKey(locationId) {
+  return LOCATION_API_KEYS[locationId] || null;
+}
 
+async function getValidAccessToken(locationId) {
   const row = tokenStore.get(locationId);
   if (!row) return null;
 
@@ -1314,12 +1315,19 @@ const findContactIdByPhone = async (locationId, e164Phone) => {
 
   for (const q of tryQueries) {
     try {
-      const r = await withLcCall(locationId, (access) =>
-        axios.get(
-          `${LC_API}/contacts/?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(q)}`,
-          { headers: lcHeaders(access), timeout: 15000 }
-        )
-      );
+      // v5.0.7: Prefer static API key for contact lookup (no OAuth conflicts)
+      const apiKey = getStaticApiKey(locationId);
+      const r = apiKey
+        ? await axios.get(
+            `${LC_API}/contacts/?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(q)}`,
+            { headers: lcHeaders(apiKey), timeout: 15000 }
+          )
+        : await withLcCall(locationId, (access) =>
+            axios.get(
+              `${LC_API}/contacts/?locationId=${encodeURIComponent(locationId)}&query=${encodeURIComponent(q)}`,
+              { headers: lcHeaders(access), timeout: 15000 }
+            )
+          );
       const list = r?.data?.contacts || r?.data?.items || r?.data?.data || [];
       
       for (const c of list) {
