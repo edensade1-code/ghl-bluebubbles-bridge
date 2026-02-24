@@ -163,6 +163,7 @@ import bodyParser from "body-parser";
 import qs from "querystring";
 import fs from "fs/promises";
 import FormData from "form-data";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 
 const app = express();
 
@@ -526,8 +527,8 @@ const STATUS_TRACKER_FILE = path.join(__dirname, "message-tracker.json");
 
 // Load persisted tracker on startup
 try {
-  if (require("fs").existsSync(STATUS_TRACKER_FILE)) {
-    const raw = require("fs").readFileSync(STATUS_TRACKER_FILE, "utf8");
+  if (existsSync(STATUS_TRACKER_FILE)) {
+    const raw = readFileSync(STATUS_TRACKER_FILE, "utf8");
     const entries = JSON.parse(raw);
     const now = Date.now();
     let loaded = 0;
@@ -551,7 +552,7 @@ const persistTracker = () => {
     _persistTimer = null;
     try {
       const entries = [...messageStatusTracker.entries()];
-      require("fs").writeFileSync(STATUS_TRACKER_FILE, JSON.stringify(entries));
+      writeFileSync(STATUS_TRACKER_FILE, JSON.stringify(entries));
       console.log(`[status-tracker] Persisted ${entries.length} entries to disk`);
     } catch (e) {
       console.log(`[status-tracker] Persist failed: ${e.message}`);
