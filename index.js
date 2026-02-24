@@ -331,7 +331,7 @@ const BLUEBUBBLES_SERVERS = [
     enabled: true,
     baseUrl: "https://bb4.asapcashhomebuyers.com",
     password: process.env.BB4_GUID || "EdenBridge2025!",
-    usePrivateAPI: (process.env.BB4_USE_PRIVATE_API || "false").toLowerCase() === "true",
+    usePrivateAPI: (process.env.BB4_USE_PRIVATE_API || "true").toLowerCase() === "true",
     parkingNumbers: [
       { number: PARKING_NUMBER_AMBER, userId: GHL_USER_ID_AMBER, user: "Amber", locationId: GHL_LOCATION_ASAP },
       { number: PARKING_NUMBER_RANDY, userId: GHL_USER_ID_RANDY, user: "Randy", locationId: GHL_LOCATION_ROCKET },
