@@ -522,6 +522,42 @@ const outboundServerMap = new Map(); // Track which server sent each message
 // ============================================================================
 const messageStatusTracker = new Map();
 const MESSAGE_STATUS_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const STATUS_TRACKER_FILE = path.join(__dirname, "message-tracker.json");
+
+// Load persisted tracker on startup
+try {
+  if (require("fs").existsSync(STATUS_TRACKER_FILE)) {
+    const raw = require("fs").readFileSync(STATUS_TRACKER_FILE, "utf8");
+    const entries = JSON.parse(raw);
+    const now = Date.now();
+    let loaded = 0;
+    for (const [k, v] of entries) {
+      if (now - v.timestamp < MESSAGE_STATUS_TTL_MS) {
+        messageStatusTracker.set(k, v);
+        loaded++;
+      }
+    }
+    console.log(`[status-tracker] Loaded ${loaded} tracked messages from disk`);
+  }
+} catch (e) {
+  console.log(`[status-tracker] Could not load persisted tracker: ${e.message}`);
+}
+
+// Persist tracker to disk (debounced)
+let _persistTimer = null;
+const persistTracker = () => {
+  if (_persistTimer) return; // already scheduled
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null;
+    try {
+      const entries = [...messageStatusTracker.entries()];
+      require("fs").writeFileSync(STATUS_TRACKER_FILE, JSON.stringify(entries));
+      console.log(`[status-tracker] Persisted ${entries.length} entries to disk`);
+    } catch (e) {
+      console.log(`[status-tracker] Persist failed: ${e.message}`);
+    }
+  }, 2000); // 2s debounce
+};
 
 // Record an outbound message so we can push status updates when receipts arrive
 const trackOutboundMessage = (guid, { phone, locationId, contactId, service = 'iMessage' } = {}) => {
@@ -537,6 +573,7 @@ const trackOutboundMessage = (guid, { phone, locationId, contactId, service = 'i
     timestamp: Date.now(),
   });
   console.log(`[status-tracker] Tracking outbound: guid=${guid}, phone=${phone}, service=${service}`);
+  persistTracker();
 
   // Prune stale entries
   if (messageStatusTracker.size > 500) {
@@ -544,6 +581,7 @@ const trackOutboundMessage = (guid, { phone, locationId, contactId, service = 'i
     for (const [k, v] of messageStatusTracker.entries()) {
       if (now - v.timestamp > MESSAGE_STATUS_TTL_MS) messageStatusTracker.delete(k);
     }
+    persistTracker();
   }
 };
 
@@ -2162,6 +2200,7 @@ async function handleBlueBubblesWebhook(req, res, serverOverride = null) {
         console.log(`[inbound] ✅ Read receipt pushed for guid ${msgGuid}`);
       }
 
+      if (pushed) persistTracker();
       return res.status(200).json({ ok: true, statusUpdate: pushed, guid: msgGuid });
     }
 
