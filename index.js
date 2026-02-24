@@ -234,12 +234,19 @@ const GHL_USER_ID_RANDY = "uZsh6k4s5BE5swncp1r8";
 const GHL_LOCATION_ASAP = "Wiw6FjEVf52zbIJXOchc";
 const GHL_LOCATION_ROCKET = "caTq6MFm4c1YbDgviLcY";
 
-// v5.0.6: Static location API keys (never expire, no OAuth needed)
-// These are Private Integration keys — one per location, no conflicts
+// v5.0.6: Static location API keys for contact lookup (never expire, no OAuth needed)
 const LOCATION_API_KEYS = {
   [GHL_LOCATION_ASAP]: process.env.GHL_API_KEY_ASAP || "pit-cb0af47b-a634-4aec-9e32-4753dde0888a",
   [GHL_LOCATION_ROCKET]: process.env.GHL_API_KEY_ROCKET || "pit-17c16b28-9295-499d-b563-fb2b8ffa132b",
 };
+
+// v5.1.0: Company ID for location token exchange
+const GHL_COMPANY_ID = process.env.GHL_COMPANY_ID || "pi8rW5lUnA2SKFcNjbMN";
+
+// All known location IDs that need tokens
+const ALL_LOCATION_IDS = [...new Set(
+  [GHL_LOCATION_ASAP, GHL_LOCATION_ROCKET]
+)];
 
 // Parking number for Randy
 const PARKING_NUMBER_RANDY = (process.env.PARKING_NUMBER_RANDY || "+17867888273").trim();
@@ -1017,32 +1024,32 @@ async function resolveDefaultToken() {
   const defaultToken = tokenStore.get("default");
   if (!defaultToken || !defaultToken.access_token) return;
 
-  // v5.0.5: Try to map "default" to a location by testing the API
-  // Only map if NO location-specific tokens exist yet
-  const knownLocationIds = [...new Set(
-    BLUEBUBBLES_SERVERS.flatMap(s => s.parkingNumbers.map(p => p.locationId).filter(Boolean))
-  )];
+  // v5.1.0: Exchange company/agency token for location-specific tokens
+  console.log("[oauth] Found 'default' (company) token — exchanging for location tokens...");
+  const exchanged = await exchangeForLocationTokens(defaultToken.access_token);
+  if (exchanged > 0) {
+    console.log(`[oauth] ✅ Successfully exchanged default token for ${exchanged} location token(s)`);
+    return;
+  }
 
-  for (const locId of knownLocationIds) {
+  // Fallback: try direct mapping if exchange fails
+  for (const locId of ALL_LOCATION_IDS) {
     if (tokenStore.has(locId)) continue;
-
     try {
       const testResp = await axios.get(
         `${LC_API}/contacts/?locationId=${encodeURIComponent(locId)}&query=test&limit=1`,
         { headers: lcHeaders(defaultToken.access_token), timeout: 10000 }
       );
       if (testResp.status === 200) {
-        console.log(`[oauth] ✅ "default" token works for ${locId} — remapping`);
+        console.log(`[oauth] Fallback: "default" token works directly for ${locId}`);
         tokenStore.set(locId, defaultToken);
-        tokenStore.delete("default");
-        await saveTokenStore();
-        return;
       }
     } catch (e) {
-      console.log(`[oauth] "default" token doesn't work for ${locId}: ${e?.response?.status || e.message}`);
+      console.log(`[oauth] Fallback: "default" token doesn't work for ${locId}`);
     }
   }
-  console.log("[oauth] could not resolve 'default' token to any location — keeping as fallback");
+  tokenStore.delete("default");
+  await saveTokenStore();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1223,6 +1230,42 @@ const tokenRefreshLocks = new Map();
 // v5.0.7: Static keys for contact lookup, OAuth for conversation provider operations
 function getStaticApiKey(locationId) {
   return LOCATION_API_KEYS[locationId] || null;
+}
+
+// v5.1.0: Exchange a company/agency token for location-specific tokens
+async function exchangeForLocationTokens(companyToken) {
+  console.log("[oauth] Exchanging company token for location tokens...");
+  let success = 0;
+  for (const locId of ALL_LOCATION_IDS) {
+    try {
+      const resp = await axios.post(
+        `${OAUTH_TOKEN_BASE}/locationToken`,
+        qs.stringify({ companyId: GHL_COMPANY_ID, locationId: locId }),
+        {
+          headers: {
+            Authorization: `Bearer ${companyToken}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+            Version: LC_VERSION,
+          },
+          timeout: 15000,
+        }
+      );
+      const locTokens = resp.data || {};
+      locTokens._created_at_ms = Date.now();
+      locTokens._source = "locationToken-exchange";
+      tokenStore.set(locId, locTokens);
+      console.log(`[oauth] ✅ Got location token for ${locId}`);
+      success++;
+    } catch (e) {
+      console.error(`[oauth] ❌ Failed to get location token for ${locId}:`, e?.response?.status, e?.response?.data?.message || e.message);
+    }
+  }
+  if (success > 0) {
+    tokenStore.delete("default");
+    await saveTokenStore();
+    console.log(`[oauth] Exchanged company token → ${success}/${ALL_LOCATION_IDS.length} location tokens`);
+  }
+  return success;
 }
 
 async function getValidAccessToken(locationId) {
@@ -3123,13 +3166,25 @@ app.all("/oauth/callback", async (req, res) => {
 
     if (!locationId) locationId = "default";
 
-    // v5.0.5: Store token ONLY for the authed location — don't overwrite others
-    // Agency tokens can't access location-level scopes (contacts, conversations)
-    // so we must keep each location's own token separate
-    tokenStore.set(locationId, tokens);
-    await saveTokenStore();
-
-    console.log(`[oauth] token saved for location: ${locationId}`);
+    // v5.1.0: If this is a company/agency token, exchange for location tokens
+    if (locationId === "default") {
+      console.log("[oauth] Company token received — exchanging for location tokens...");
+      tokenStore.set("default", tokens); // temp store for refresh
+      const exchanged = await exchangeForLocationTokens(tokens.access_token);
+      if (exchanged > 0) {
+        // Keep the default token too for future refresh/exchange
+        await saveTokenStore();
+        console.log(`[oauth] ✅ Exchanged to ${exchanged} location token(s)`);
+      } else {
+        await saveTokenStore();
+        console.log("[oauth] ⚠️ Exchange failed, stored as 'default'");
+      }
+    } else {
+      // Location-specific token — store only for that location
+      tokenStore.set(locationId, tokens);
+      await saveTokenStore();
+      console.log(`[oauth] token saved for location: ${locationId}`);
+    }
 
     const arr = Array.from(tokenStore.entries());
     const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
