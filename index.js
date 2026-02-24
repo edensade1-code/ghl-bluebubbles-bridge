@@ -164,6 +164,10 @@ import qs from "querystring";
 import fs from "fs/promises";
 import FormData from "form-data";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+const __filename_esm = fileURLToPath(import.meta.url);
+const __dirname_esm = path.dirname(__filename_esm);
 
 const app = express();
 
@@ -523,7 +527,7 @@ const outboundServerMap = new Map(); // Track which server sent each message
 // ============================================================================
 const messageStatusTracker = new Map();
 const MESSAGE_STATUS_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const STATUS_TRACKER_FILE = path.join(__dirname, "message-tracker.json");
+const STATUS_TRACKER_FILE = path.join(__dirname_esm, "message-tracker.json");
 
 // Load persisted tracker on startup
 try {
