@@ -2,7 +2,7 @@
  * ============================================================================
  * Eden Bridge — Custom JS v2.0 for GHL Marketplace
  * ============================================================================
- * Version : 4.2.0 | Updated: 2026-02-18
+ * Version : 4.3.0 | Updated: 2026-02-24
  *
  * WHAT THIS DOES:
  *  1. Reorders conversation tabs so iMessage appears first
@@ -285,46 +285,132 @@
   /* 5. APPLY STATUS STYLING TO MESSAGE ITEMS                                  */
   /* ========================================================================= */
 
+  /*
+   * Strategy: walk ALL elements in the message area, check innerText of
+   * leaf-ish elements. When a status match is found, walk UP the DOM to
+   * find the outermost "message row" container and restyle the whole thing.
+   *
+   * This is intentionally aggressive — GHL class names change often,
+   * so we rely on TEXT CONTENT, not selectors.
+   */
+
+  function findMessageRow(el) {
+    // Walk up from the text element to find the message row container.
+    // Heuristic: it's the ancestor that represents one "row" in the chat.
+    // Usually has a significant height, margin, or is a direct child of the
+    // scrollable message list.
+    let node = el;
+    let candidate = el;
+    let depth = 0;
+    while (node && node !== document.body && depth < 15) {
+      // If parent is the scrollable container (large list of messages), stop here
+      const parent = node.parentElement;
+      if (!parent) break;
+      
+      const siblings = parent.children.length;
+      // Message lists typically have many siblings (each message is one)
+      if (siblings > 3) {
+        candidate = node;
+      }
+      node = parent;
+      depth++;
+    }
+    return candidate;
+  }
+
   function applyStatusStyling(root = document) {
-    const itemSelectors = [
-      "[class*='message-item']",
-      "[class*='chat-message']",
-      "[class*='conversation-message']",
-      "[class*='message-wrapper']",
-      "[class*='msg-row']",
+    // Find the message container area — usually a scrollable div with many children
+    const containers = root.querySelectorAll(
+      "[class*='message-list'], [class*='chat-body'], [class*='conversation-body'], " +
+      "[class*='messages-container'], [class*='msg-list'], [class*='message-area'], " +
+      "[class*='chat-messages'], [class*='conversation-messages']"
+    );
+
+    // Also try: any scrollable div with 5+ children that contains message-like content
+    const allDivs = containers.length > 0 ? containers : root.querySelectorAll("div[style*='overflow']");
+
+    // Broad scan: find all elements whose trimmed text matches a status pattern
+    // and whose text is SHORT (status messages are always <60 chars)
+    const walker = document.createTreeWalker(
+      root.body || root,
+      NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode(node) {
+          if (node.dataset && node.dataset.edenStyled) return NodeFilter.FILTER_REJECT;
+          // Only check elements that DIRECTLY contain text (leaf-ish)
+          const text = node.textContent?.trim() || "";
+          if (text.length > 0 && text.length < 80 && node.children.length < 5) {
+            return NodeFilter.FILTER_ACCEPT;
+          }
+          return NodeFilter.FILTER_SKIP;
+        }
+      }
+    );
+
+    const hits = [];
+    let walkNode;
+    while ((walkNode = walker.nextNode())) {
+      const text = walkNode.textContent.trim();
+      const cls = detectStatusClass(text);
+      if (cls) hits.push({ el: walkNode, text, cls });
+    }
+
+    for (const { el, text, cls } of hits) {
+      // Find the message row (outermost container for this single message)
+      const row = findMessageRow(el);
+      if (row.dataset.edenStyled) continue;
+
+      row.dataset.edenStyled = "status";
+      row.classList.add("eden-status-wrapper");
+      row.style.setProperty("margin-top",    "0",     "important");
+      row.style.setProperty("margin-bottom", "2px",   "important");
+      row.style.setProperty("min-height",    "auto",  "important");
+      row.style.setProperty("padding",       "0 8px", "important");
+
+      // Collapse ALL descendant containers to strip bubble chrome
+      for (const child of row.querySelectorAll("*")) {
+        const s = getComputedStyle(child);
+        if (s.backgroundColor && s.backgroundColor !== "rgba(0, 0, 0, 0)" && s.backgroundColor !== "transparent") {
+          child.style.setProperty("background", "transparent", "important");
+        }
+        if (s.boxShadow && s.boxShadow !== "none") {
+          child.style.setProperty("box-shadow", "none", "important");
+        }
+        if (s.border && s.border !== "none" && !s.border.includes("0px")) {
+          child.style.setProperty("border", "none", "important");
+        }
+        if (parseInt(s.padding) > 4) {
+          child.style.setProperty("padding", "0", "important");
+        }
+        if (parseInt(s.borderRadius) > 0) {
+          child.style.setProperty("border-radius", "0", "important");
+        }
+      }
+
+      // Build the indicator span
+      const span      = document.createElement("span");
+      span.className  = `eden-status-row ${cls}`;
+      span.textContent = text;
+
+      // Find the innermost text-bearing element and replace content
+      const textEl = el.children.length === 0 ? el : 
+        el.querySelector("[class*='body']") || 
+        el.querySelector("[class*='text']") || 
+        el.querySelector("[class*='content']") || 
+        el.querySelector("p, span") || el;
+      
+      textEl.innerHTML = "";
+      textEl.appendChild(span);
+    }
+
+    // Also mark non-status messages so we don't re-scan them
+    const msgSelectors = [
+      "[class*='message-item']", "[class*='chat-message']", "[class*='conversation-message']",
+      "[class*='message-wrapper']", "[class*='msg-row']",
     ];
-
-    for (const sel of itemSelectors) {
+    for (const sel of msgSelectors) {
       for (const item of root.querySelectorAll(sel)) {
-        if (item.dataset.edenStyled) continue;
-
-        // Find the text-bearing child
-        const textEl =
-          item.querySelector("[class*='message-body']")  ||
-          item.querySelector("[class*='message-text']")  ||
-          item.querySelector("[class*='bubble-text']")   ||
-          item.querySelector("[class*='content']")       ||
-          item;
-
-        const rawText = (textEl.textContent || "").trim();
-        const statusCls = detectStatusClass(rawText);
-
-        if (statusCls) {
-          item.dataset.edenStyled = "status";
-          item.classList.add("eden-status-wrapper");
-          item.style.setProperty("margin-top",    "0",           "important");
-          item.style.setProperty("margin-bottom", "2px",         "important");
-          item.style.setProperty("min-height",    "auto",        "important");
-
-          // Build the indicator span
-          const span      = document.createElement("span");
-          span.className  = `eden-status-row ${statusCls}`;
-          span.textContent = rawText;
-
-          // Replace the inner text with our styled span
-          textEl.innerHTML = "";
-          textEl.appendChild(span);
-        } else {
+        if (!item.dataset.edenStyled) {
           item.dataset.edenStyled = "message";
         }
       }
@@ -423,7 +509,7 @@
     applyStatusStyling();
     applyIMessageBodyClass();
     startObserver();
-    console.log("[EdenBridge] v4.2.0 initialised");
+    console.log("[EdenBridge] v4.3.0 initialised");
   }
 
   if (document.readyState === "loading") {
@@ -445,7 +531,7 @@
   /* ========================================================================= */
 
   window.EdenBridge = {
-    version:              "4.2.0",
+    version:              "4.3.0",
     reorderTabs,
     autoSelectIMessageTab,
     applyStatusStyling,

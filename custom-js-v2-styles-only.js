@@ -2,7 +2,7 @@
  * ============================================================================
  * Eden Bridge — Status Styles v1.0 for GHL Marketplace
  * ============================================================================
- * Version : 1.0.0 | Updated: 2026-02-18
+ * Version : 1.1.0 | Updated: 2026-02-24
  *
  * WHAT THIS DOES:
  *  1. Apple-style glow on outbound (right-side) message bubbles
@@ -184,46 +184,91 @@
     return null;
   }
 
+  function findMessageRow(el) {
+    var node = el;
+    var candidate = el;
+    var depth = 0;
+    while (node && node !== document.body && depth < 15) {
+      var parent = node.parentElement;
+      if (!parent) break;
+      if (parent.children.length > 3) candidate = node;
+      node = parent;
+      depth++;
+    }
+    return candidate;
+  }
+
   function applyStatusStyling(root) {
-    const selectors = [
-      "[class*='message-item']",
-      "[class*='chat-message']",
-      "[class*='conversation-message']",
-      "[class*='message-wrapper']",
-      "[class*='msg-row']",
-    ];
-
-    for (const sel of selectors) {
-      for (const item of (root || document).querySelectorAll(sel)) {
-        if (item.dataset.edenStyled) continue;
-
-        const textEl =
-          item.querySelector("[class*='message-body']") ||
-          item.querySelector("[class*='message-text']") ||
-          item.querySelector("[class*='bubble-text']") ||
-          item.querySelector("[class*='content']") ||
-          item;
-
-        const rawText = (textEl.textContent || "").trim();
-        const statusCls = detectStatusClass(rawText);
-
-        if (statusCls) {
-          item.dataset.edenStyled = "status";
-          item.classList.add("eden-status-wrapper");
-          item.style.setProperty("margin-top", "0", "important");
-          item.style.setProperty("margin-bottom", "2px", "important");
-          item.style.setProperty("min-height", "auto", "important");
-
-          const span = document.createElement("span");
-          span.className = "eden-status-row " + statusCls;
-          span.textContent = rawText;
-
-          textEl.innerHTML = "";
-          textEl.appendChild(span);
-        } else {
-          item.dataset.edenStyled = "message";
+    var baseEl = (root && root.body) || root || document.body || document;
+    var walker = document.createTreeWalker(
+      baseEl,
+      NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode: function(node) {
+          if (node.dataset && node.dataset.edenStyled) return NodeFilter.FILTER_REJECT;
+          var text = (node.textContent || "").trim();
+          if (text.length > 0 && text.length < 80 && node.children.length < 5) {
+            return NodeFilter.FILTER_ACCEPT;
+          }
+          return NodeFilter.FILTER_SKIP;
         }
       }
+    );
+
+    var hits = [];
+    var walkNode;
+    while ((walkNode = walker.nextNode())) {
+      var text = walkNode.textContent.trim();
+      var cls = detectStatusClass(text);
+      if (cls) hits.push({ el: walkNode, text: text, cls: cls });
+    }
+
+    for (var i = 0; i < hits.length; i++) {
+      var hit = hits[i];
+      var row = findMessageRow(hit.el);
+      if (row.dataset.edenStyled) continue;
+
+      row.dataset.edenStyled = "status";
+      row.classList.add("eden-status-wrapper");
+      row.style.setProperty("margin-top", "0", "important");
+      row.style.setProperty("margin-bottom", "2px", "important");
+      row.style.setProperty("min-height", "auto", "important");
+      row.style.setProperty("padding", "0 8px", "important");
+
+      // Strip bubble chrome from all descendants
+      var children = row.querySelectorAll("*");
+      for (var j = 0; j < children.length; j++) {
+        var child = children[j];
+        var s = getComputedStyle(child);
+        if (s.backgroundColor && s.backgroundColor !== "rgba(0, 0, 0, 0)" && s.backgroundColor !== "transparent") {
+          child.style.setProperty("background", "transparent", "important");
+        }
+        if (s.boxShadow && s.boxShadow !== "none") {
+          child.style.setProperty("box-shadow", "none", "important");
+        }
+        if (s.border && s.border !== "none" && !s.border.includes("0px")) {
+          child.style.setProperty("border", "none", "important");
+        }
+        if (parseInt(s.padding) > 4) {
+          child.style.setProperty("padding", "0", "important");
+        }
+        if (parseInt(s.borderRadius) > 0) {
+          child.style.setProperty("border-radius", "0", "important");
+        }
+      }
+
+      var span = document.createElement("span");
+      span.className = "eden-status-row " + hit.cls;
+      span.textContent = hit.text;
+
+      var textEl = hit.el.children.length === 0 ? hit.el :
+        hit.el.querySelector("[class*='body']") ||
+        hit.el.querySelector("[class*='text']") ||
+        hit.el.querySelector("[class*='content']") ||
+        hit.el.querySelector("p, span") || hit.el;
+
+      textEl.innerHTML = "";
+      textEl.appendChild(span);
     }
   }
 
