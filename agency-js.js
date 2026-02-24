@@ -62,22 +62,52 @@
         var m = rawText.match(STATUS_PATTERNS[j].test);
         if (m) {
           match = STATUS_PATTERNS[j];
-          // Extract just the status portion (up to "PM"/"AM")
-          var pmIdx = rawText.indexOf("PM");
-          var amIdx = rawText.indexOf("AM");
-          var endIdx = Math.max(pmIdx, amIdx);
-          statusText = endIdx > 0 ? rawText.substring(0, endIdx + 2) : rawText.split("Message")[0].trim();
-          // Shorten "Delivered via iMessage" → "iMessage"
-          statusText = statusText.replace(/^Delivered via iMessage/i, "iMessage");
-          // Shorten "Sent as SMS (contact may not have iMessage)" → "SMS"
-          statusText = statusText.replace(/^Sent as SMS[^·]*/i, "SMS ");
-          // Shorten "Delivered via RCS" → "RCS"
-          statusText = statusText.replace(/^Delivered via RCS/i, "RCS");
+          // Shorten status text
+          if (match.cls === "eden-status-delivered") {
+            statusText = "iMessage";
+          } else if (match.cls === "eden-status-rcs") {
+            statusText = "RCS";
+          } else if (match.cls === "eden-status-sms") {
+            statusText = "SMS";
+          } else if (match.cls === "eden-status-read") {
+            // Keep read time since it differs from send time
+            var pmIdx = rawText.indexOf("PM");
+            var amIdx = rawText.indexOf("AM");
+            var endIdx = Math.max(pmIdx, amIdx);
+            statusText = endIdx > 0 ? "Read " + rawText.match(/\d{1,2}:\d{2}\s*[AP]M/i)?.[0] : "Read";
+          }
           break;
         }
       }
       
       if (!match) continue;
+      
+      // Check if next sibling is a Read status — if so, merge into one line
+      var mergedReadText = "";
+      if (match.cls !== "eden-status-read") {
+        var next = w.nextElementSibling;
+        if (next && !next.dataset.edenChecked) {
+          var nextBubble = next.querySelector(".message-bubble, .cnv-message-bubble");
+          if (nextBubble) {
+            var nextRaw = (nextBubble.textContent || "").trim();
+            if (/^Read \d/i.test(nextRaw)) {
+              // Extract read time
+              var readTimeMatch = nextRaw.match(/\d{1,2}:\d{2}\s*[AP]M/i);
+              mergedReadText = readTimeMatch ? "Read " + readTimeMatch[0] : "Read";
+              // Hide the next row entirely
+              next.dataset.edenChecked = "1";
+              next.innerHTML = "";
+              next.style.setProperty("display", "none", "important");
+            }
+          }
+        }
+      }
+      
+      // If this IS a read row and wasn't already merged, show standalone
+      if (match.cls === "eden-status-read" && !mergedReadText) {
+        var readTimeMatch2 = rawText.match(/\d{1,2}:\d{2}\s*[AP]M/i);
+        statusText = readTimeMatch2 ? "Read " + readTimeMatch2[0] : "Read";
+      }
       
       // Add classes
       w.classList.add("eden-status-msg");
@@ -91,9 +121,7 @@
       w.style.setProperty("border", "none", "important");
       w.style.setProperty("border-radius", "0", "important");
       w.style.setProperty("padding", "0", "important");
-      // Delivered gets pulled up close to timestamp; Read follows naturally
-      var isRead = match.cls === "eden-status-read";
-      w.style.setProperty("margin", isRead ? "-2px 0 0 0" : "-14px 0 0 0", "important");
+      w.style.setProperty("margin", "-28px 0 0 0", "important");
       w.style.setProperty("min-height", "0", "important");
       w.style.setProperty("max-height", "16px", "important");
       w.style.setProperty("height", "16px", "important");
@@ -101,18 +129,52 @@
       w.style.setProperty("display", "flex", "important");
       w.style.setProperty("justify-content", "flex-end", "important");
       w.style.setProperty("align-items", "center", "important");
-      w.style.setProperty("padding-right", "12px", "important");
+      w.style.setProperty("padding-right", "42px", "important");
       
-      // Create clean indicator
+      // Build the combined line
       var span = document.createElement("span");
-      span.textContent = match.icon + " " + statusText;
+      var displayText = match.icon + " " + statusText;
+      if (mergedReadText) {
+        displayText += "  ✓✓ " + mergedReadText;
+      }
       span.style.setProperty("font-size", "10px", "important");
-      span.style.setProperty("color", match.color, "important");
       span.style.setProperty("font-family", "-apple-system, BlinkMacSystemFont, system-ui, sans-serif", "important");
       span.style.setProperty("font-weight", "400", "important");
       span.style.setProperty("line-height", "16px", "important");
       span.style.setProperty("white-space", "nowrap", "important");
-      w.appendChild(span);
+      
+      // Flex column layout — two lines stacked
+      w.style.setProperty("flex-direction", "column", "important");
+      w.style.setProperty("align-items", "flex-end", "important");
+      w.style.setProperty("justify-content", "center", "important");
+      
+      var s1 = document.createElement("span");
+      s1.textContent = match.icon + " " + statusText;
+      s1.style.setProperty("color", match.color, "important");
+      s1.style.setProperty("font-size", "10px", "important");
+      s1.style.setProperty("white-space", "nowrap", "important");
+      s1.style.setProperty("font-family", "-apple-system, BlinkMacSystemFont, system-ui, sans-serif", "important");
+      s1.style.setProperty("margin-right", "50px", "important");
+      s1.style.setProperty("line-height", "14px", "important");
+      w.appendChild(s1);
+      
+      if (mergedReadText) {
+        var s2 = document.createElement("span");
+        s2.textContent = "✓✓ " + mergedReadText;
+        s2.style.setProperty("color", "#007aff", "important");
+        s2.style.setProperty("font-size", "10px", "important");
+        s2.style.setProperty("white-space", "nowrap", "important");
+        s2.style.setProperty("font-family", "-apple-system, BlinkMacSystemFont, system-ui, sans-serif", "important");
+        s2.style.setProperty("margin-right", "30px", "important");
+        s2.style.setProperty("line-height", "14px", "important");
+        w.appendChild(s2);
+        w.style.setProperty("max-height", "32px", "important");
+        w.style.setProperty("height", "32px", "important");
+      }
+      
+      if (!mergedReadText && match.cls === "eden-status-read") {
+        s1.style.setProperty("margin-right", "30px", "important");
+      }
     }
   }
 
@@ -145,7 +207,7 @@
     applyBodyClass();
     var observer = new MutationObserver(onDOMChange);
     observer.observe(document.body, { childList: true, subtree: true });
-    console.log("[EdenBridge] v2.2 initialized");
+    console.log("[EdenBridge] v2.8 initialized");
   }
 
   if (document.readyState === "loading") {
