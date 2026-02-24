@@ -1010,32 +1010,29 @@ async function resolveDefaultToken() {
   const defaultToken = tokenStore.get("default");
   if (!defaultToken || !defaultToken.access_token) return;
 
-  // Check if "default" is the only unresolved token
+  // v5.0.4: Agency-level tokens work for ALL locations — map to every known location
   const knownLocationIds = [...new Set(
     BLUEBUBBLES_SERVERS.flatMap(s => s.parkingNumbers.map(p => p.locationId).filter(Boolean))
   )];
 
+  let mapped = 0;
   for (const locId of knownLocationIds) {
-    if (tokenStore.has(locId)) continue; // Already have a token for this location
-
-    // Try using the default token to search this location
-    try {
-      const testResp = await axios.get(
-        `${LC_API}/contacts/?locationId=${encodeURIComponent(locId)}&limit=1`,
-        { headers: lcHeaders(defaultToken.access_token), timeout: 10000 }
-      );
-      if (testResp.status === 200) {
-        console.log(`[oauth] ✅ "default" token works for location ${locId} — remapping`);
-        tokenStore.set(locId, defaultToken);
-        tokenStore.delete("default");
-        await saveTokenStore();
-        return;
-      }
-    } catch (e) {
-      console.log(`[oauth] "default" token does NOT work for ${locId}: ${e?.response?.status || e.message}`);
+    if (tokenStore.has(locId)) {
+      console.log(`[oauth] Location ${locId} already has its own token, skipping`);
+      continue;
     }
+    console.log(`[oauth] ✅ Mapping "default" agency token → ${locId}`);
+    tokenStore.set(locId, { ...defaultToken });
+    mapped++;
   }
-  console.log("[oauth] could not resolve 'default' token to any known location");
+
+  if (mapped > 0) {
+    tokenStore.delete("default");
+    await saveTokenStore();
+    console.log(`[oauth] Resolved "default" token to ${mapped} location(s)`);
+  } else {
+    console.log("[oauth] All locations already have tokens, keeping 'default' as fallback");
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1214,7 +1211,17 @@ const getAnyLocation = () => {
 const tokenRefreshLocks = new Map();
 
 async function getValidAccessToken(locationId) {
-  const row = tokenStore.get(locationId);
+  let row = tokenStore.get(locationId);
+  // v5.0.4: Fallback to any available token (agency-level tokens work for all locations)
+  if (!row) {
+    for (const [key, val] of tokenStore.entries()) {
+      if (val?.access_token) {
+        console.log(`[oauth] No token for ${locationId}, falling back to token from '${key}'`);
+        row = val;
+        break;
+      }
+    }
+  }
   if (!row) return null;
 
   const created = Number(row._created_at_ms || 0) || Date.now();
@@ -3104,10 +3111,24 @@ app.all("/oauth/callback", async (req, res) => {
 
     if (!locationId) locationId = "default";
 
+    // v5.0.4: GHL only allows one active token per app — store for ALL known locations
+    // so re-authing one location doesn't break the others
+    const allLocationIds = [...new Set(
+      BLUEBUBBLES_SERVERS.flatMap(s => s.parkingNumbers.map(p => p.locationId).filter(Boolean))
+    )];
+
     tokenStore.set(locationId, tokens);
+    for (const locId of allLocationIds) {
+      if (locId !== locationId) {
+        tokenStore.set(locId, { ...tokens });
+        console.log(`[oauth] Also stored token for location: ${locId}`);
+      }
+    }
+    // Remove stale "default" key if it exists
+    if (locationId !== "default") tokenStore.delete("default");
     await saveTokenStore();
 
-    console.log("[oauth] tokens saved for location:", locationId);
+    console.log(`[oauth] tokens saved for ${allLocationIds.length} location(s), authed via: ${locationId}`);
 
     const arr = Array.from(tokenStore.entries());
     const base64 = Buffer.from(JSON.stringify(arr)).toString('base64');
