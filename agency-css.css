@@ -1,0 +1,124 @@
+/* Eden Bridge Styles v1.3 */
+
+/* iMessage Tab Glow */
+.eden-imessage-tab {
+  box-shadow: 0 0 0 2px rgba(0,122,255,0.30), 0 2px 14px rgba(0,122,255,0.20) !important;
+  border-color: rgba(0,122,255,0.45) !important;
+}
+
+/* Outbound Bubble Glow (exclude status rows) */
+body.eden-imessage-active .messages-single.right:not(.eden-status-msg) .message-bubble,
+body.eden-imessage-active .messages-single.right:not(.eden-status-msg) .cnv-message-bubble {
+  box-shadow: 0 0 0 1.5px rgba(0,122,255,0.18), 0 3px 20px rgba(0,122,255,0.28), 0 1px 6px rgba(0,0,0,0.08) !important;
+}
+
+/* ── Status messages: NUKE all bubble styling ── */
+.eden-status-msg,
+.eden-status-msg * {
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+.eden-status-msg {
+  margin-top: -6px !important;
+  margin-bottom: 2px !important;
+  min-height: auto !important;
+  max-height: 24px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.eden-status-msg .message-bubble,
+.eden-status-msg .cnv-message-bubble {
+  padding: 0 12px !important;
+  min-height: auto !important;
+  max-height: 20px !important;
+  line-height: 20px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+}
+
+/* All text inside status → tiny gray */
+.eden-status-msg .message-bubble,
+.eden-status-msg .message-bubble *,
+.eden-status-msg .cnv-message-bubble,
+.eden-status-msg .cnv-message-bubble *,
+.eden-status-msg p,
+.eden-status-msg span,
+.eden-status-msg div {
+  font-size: 11px !important;
+  line-height: 20px !important;
+  color: #8e8e93 !important;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif !important;
+  font-weight: 400 !important;
+}
+
+/* Hide avatar, timestamp, extras on status rows */
+.eden-status-msg .message-avatar,
+.eden-status-msg [class*="avatar"],
+.eden-status-msg [class*="timestamp"],
+.eden-status-msg [class*="msg-time"],
+.eden-status-msg [class*="message-time"],
+.eden-status-msg [class*="time-label"] {
+  display: none !important;
+}
+
+/* ── Checkmark icons ── */
+
+/* ✓ Delivered */
+.eden-status-delivered .message-bubble::before,
+.eden-status-delivered .cnv-message-bubble::before {
+  content: "\2713  " !important;
+  color: #8e8e93 !important;
+  font-weight: 600 !important;
+  font-size: 11px !important;
+}
+
+/* ✓✓ Read — blue */
+.eden-status-read .message-bubble::before,
+.eden-status-read .cnv-message-bubble::before {
+  content: "\2713\2713  " !important;
+  color: #007aff !important;
+  font-weight: 600 !important;
+  font-size: 10px !important;
+  letter-spacing: -2px !important;
+  margin-right: 3px !important;
+}
+.eden-status-read .message-bubble,
+.eden-status-read .message-bubble *,
+.eden-status-read .cnv-message-bubble,
+.eden-status-read .cnv-message-bubble * {
+  color: #007aff !important;
+}
+
+/* ▲ SMS — orange */
+.eden-status-sms .message-bubble::before,
+.eden-status-sms .cnv-message-bubble::before {
+  content: "\25B2  " !important;
+  color: #ff9500 !important;
+  font-size: 8px !important;
+}
+.eden-status-sms .message-bubble,
+.eden-status-sms .message-bubble *,
+.eden-status-sms .cnv-message-bubble,
+.eden-status-sms .cnv-message-bubble * {
+  color: #ff9500 !important;
+}
+
+/* ⊙ RCS — green */
+.eden-status-rcs .message-bubble::before,
+.eden-status-rcs .cnv-message-bubble::before {
+  content: "\2299  " !important;
+  color: #34c759 !important;
+  font-size: 10px !important;
+}
+.eden-status-rcs .message-bubble,
+.eden-status-rcs .message-bubble *,
+.eden-status-rcs .cnv-message-bubble,
+.eden-status-rcs .cnv-message-bubble * {
+  color: #34c759 !important;
+}
