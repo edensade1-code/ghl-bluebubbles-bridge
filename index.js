@@ -2035,13 +2035,20 @@ provider: "eden-imessage",
     }
 
     // v4.2.0: Track outbound message guid for delivery/read receipt processing
+    // v5.1.2 FIX: Use actual user's locationId instead of getAnyLocation()
+    // getAnyLocation() always returned the first token (ASAP), causing receipt
+    // lookups to fail for other locations (e.g. Rocket/Randy)
     if (textMessageSent && data) {
       const msgGuid = data?.guid || data?.data?.guid;
       if (msgGuid) {
-        const anyLoc = getAnyLocation();
+        // Determine correct locationId from the user/server config
+        const senderPhone = server.phoneNumbers?.find(p => p.userId === userId);
+        const senderParking = server.parkingNumbers?.find(p => p.userId === userId);
+        const actualLocationId = senderPhone?.locationId || senderParking?.locationId || getAnyLocation()?.locationId || null;
+        console.log(`[receipt-track] Tracking guid ${msgGuid} → locationId ${actualLocationId} (user ${userId})`);
         trackOutboundMessage(msgGuid, {
           phone: e164,
-          locationId: anyLoc?.locationId || null,
+          locationId: actualLocationId,
           contactId: null, // looked up lazily when receipt arrives
           service: 'iMessage',
         });
